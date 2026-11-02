@@ -149,7 +149,66 @@ sudo install -m 600 app.pem /etc/github-token-broker/app.pem
 ```
 
 The process needs access to the SPIRE Workload API socket
-(`SPIFFE_ENDPOINT_SOCKET`, normally `/run/spire/sockets/agent.sock`).
+(`SPIFFE_ENDPOINT_SOCKET`, normally `/run/spire/agent/public/api.sock`).
+
+## Nix flake and NixOS module
+
+The repository is a flake:
+
+```sh
+nix build .#github-token-broker
+nix flake check
+```
+
+The NixOS module is exposed as `nixosModules.default`:
+
+```nix
+services.github-token-broker = {
+  enable = true;
+  trustDomain = "example.org";
+  appID = 123456;
+  installationID = 789012;
+  privateKeyFile = "/run/secrets/github-app.pem";
+  apiURL = "https://api.github.com";
+
+  policies = [
+    {
+      spiffeID = "spiffe://example.org/agent/opencode";
+      repositories = [ "example/repo" ];
+      permissions = {
+        contents = "write";
+        pull_requests = "write";
+      };
+    }
+  ];
+};
+```
+
+The module:
+
+- loads the private key as a systemd credential (not a world-readable path),
+- creates a dedicated `github-token-broker` user by default
+  (`user`, `group`, and `createUser` are options),
+- gives the service the `spire-agent` group so it can read the Workload API socket
+  (`spireGroup`),
+- runs the broker with a hardened systemd unit.
+
+`SPIFFE_ENDPOINT_SOCKET` defaults to
+`unix:///run/spire/agent/public/api.sock`; override `spiffeEndpointSocket` if
+the agent socket is elsewhere.
+
+## Integration test
+
+`checks.x86_64-linux.spire` is a NixOS VM test with:
+
+- a real SPIRE server and agent using `x509pop` node attestation,
+- a fake GitHub token endpoint,
+- the broker running from the NixOS module,
+- `agent-token` running as a registered workload.
+
+It verifies that the broker and client get X509-SVIDs, that the broker mints a
+repository/permission-scoped token, that the fake GitHub API receives the
+expected scoped request, and that a policy-denied permission is rejected.
 
 ## gRPC API
 
