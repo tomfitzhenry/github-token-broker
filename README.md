@@ -93,29 +93,59 @@ the registrations point at the appropriate parent agent.
 
 ## Configuration
 
-See [`config.example.json`](./config.example.json).
+There is no config file; everything is a flag.
 
-- `trust_domain`: the SPIFFE trust domain the broker accepts at the TLS layer.
-- `github.app_id` / `installation_id` / `private_key_file`: GitHub App.
-- `policies`: per-SPIFFE-ID allowlist. A policy names repositories and the
-  maximum permissions the identity may request. A policy may override
-  `installation_id`.
-- `cache_skew_seconds`: stop serving a cached token this long before it expires
-  (default 300, must be below one hour).
+| Flag | Meaning |
+|---|---|
+| `-listen` | listen address, default `:8443` |
+| `-trust-domain` | SPIFFE trust domain accepted at the TLS layer |
+| `-app-id` | GitHub App ID |
+| `-installation-id` | default App installation ID |
+| `-private-key` | path to the App RSA private key |
+| `-api-url` | GitHub API base URL, default `https://api.github.com` |
+| `-cache-skew` | stop serving cached tokens this long before expiry, default `5m` |
+| `-policy` | repeatable per-SPIFFE-ID policy |
+
+A policy is:
+
+```text
+spiffe_id=SPIFFE_ID;repositories=owner/repo[,owner/repo...];permissions=name=read|write[,name=read|write...][;installation_id=N]
+```
+
+Example:
+
+```sh
+./bin/github-token-broker \
+  -trust-domain example.org \
+  -app-id 123456 \
+  -installation-id 789012 \
+  -private-key /etc/github-token-broker/app.pem \
+  -policy 'spiffe_id=spiffe://example.org/agent/opencode;repositories=example/repo,owner/other;permissions=contents=write,pull_requests=write' \
+  -policy 'spiffe_id=spiffe://example.org/agent/readonly;repositories=example/repo;permissions=contents=read'
+```
 
 An empty requested permission set means “all permissions in the matching
 policy”. A requested permission must be present in the policy and no stronger
 than the policy value (`read` < `write`). A request for another repository is
-forbidden.
+forbidden. A policy may override the global `-installation-id` with
+`;installation_id=N`.
+
+Each token is still scoped to one repository. Listing several repositories in a
+policy means the agent may request any of them, not that one token covers all of
+them.
 
 ## Run
 
 ```sh
 sudo install -d -m 700 /etc/github-token-broker
 sudo install -m 600 app.pem /etc/github-token-broker/app.pem
-sudo install -m 600 config.json /etc/github-token-broker/config.json
 
-./bin/github-token-broker -config /etc/github-token-broker/config.json
+./bin/github-token-broker \
+  -trust-domain example.org \
+  -app-id 123456 \
+  -installation-id 789012 \
+  -private-key /etc/github-token-broker/app.pem \
+  -policy 'spiffe_id=spiffe://example.org/agent/opencode;repositories=example/repo;permissions=contents=write,pull_requests=write'
 ```
 
 The process needs access to the SPIRE Workload API socket

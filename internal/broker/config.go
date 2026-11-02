@@ -2,9 +2,9 @@ package broker
 
 import (
 	"crypto/rsa"
-	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,8 +12,7 @@ import (
 	"github.com/tomfitzhenry/github-token-broker/internal/githubapi"
 )
 
-// Config is the broker configuration. It is parsed from JSON with the standard
-// library; no configuration framework is used.
+// Config is the broker configuration. It is built from command-line flags.
 type Config struct {
 	ListenAddr  string
 	TrustDomain spiffeid.TrustDomain
@@ -24,10 +23,10 @@ type Config struct {
 }
 
 type GitHubConfig struct {
-	AppID          int64  `json:"app_id"`
-	InstallationID int64  `json:"installation_id"`
-	PrivateKeyFile string `json:"private_key_file"`
-	APIURL         string `json:"api_url"`
+	AppID          int64
+	InstallationID int64
+	PrivateKeyFile string
+	APIURL         string
 }
 
 type Policy struct {
@@ -37,118 +36,181 @@ type Policy struct {
 	Permissions    map[string]string
 }
 
-type rawConfig struct {
-	ListenAddr       string       `json:"listen_addr"`
-	TrustDomain      string       `json:"trust_domain"`
-	CacheSkewSeconds int          `json:"cache_skew_seconds"`
-	GitHub           GitHubConfig `json:"github"`
-	Policies         []rawPolicy  `json:"policies"`
-}
-
-type rawPolicy struct {
-	SPIFFEID       string            `json:"spiffe_id"`
-	InstallationID int64             `json:"installation_id"`
-	Repositories   []string          `json:"repositories"`
-	Permissions    map[string]string `json:"permissions"`
-}
-
-// LoadConfig reads and validates a JSON configuration file.
-func LoadConfig(path string) (*Config, error) {
+// LoadPrivateKey reads and parses the GitHub App RSA private key.
+func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, fmt.Errorf("read private key: %w", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	var raw rawConfig
-	if err := decoder.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-
-	if raw.ListenAddr == "" {
-		raw.ListenAddr = ":8443"
-	}
-	if raw.TrustDomain == "" {
-		return nil, fmt.Errorf("trust_domain is required")
-	}
-	trustDomain, err := spiffeid.TrustDomainFromString(raw.TrustDomain)
+	key, err := githubapi.ParsePrivateKey(data)
 	if err != nil {
-		return nil, fmt.Errorf("trust_domain: %w", err)
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+	return key, nil
+}
+
+// Validate applies defaults and checks the flag-derived configuration.
+func (c *Config) Validate() error {
+	if c.ListenAddr == "" {
+		c.ListenAddr = ":8443"
+	}
+	if c.TrustDomain.String() == "" {
+		return fmt.Errorf("-trust-domain is required")
+	}
+	if c.GitHub.AppID <= 0 {
+		return fmt.Errorf("-app-id is required")
+	}
+	if c.GitHub.InstallationID <= 0 {
+		return fmt.Errorf("-installation-id is required")
+	}
+	if c.Key == nil {
+		return fmt.Errorf("-private-key is required")
+	}
+	if c.GitHub.APIURL == "" {
+		c.GitHub.APIURL = githubapi.DefaultAPIURL
+	}
+	if c.CacheSkew == 0 {
+		c.CacheSkew = 5 * time.Minute
+	}
+	if c.CacheSkew < time.Minute || c.CacheSkew >= time.Hour {
+		return fmt.Errorf("-cache-skew must be between 1m and 59m")
+	}
+	if len(c.Policies) == 0 {
+		return fmt.Errorf("at least one -policy is required")
 	}
 
-	cacheSkew := 5 * time.Minute
-	if raw.CacheSkewSeconds != 0 {
-		if raw.CacheSkewSeconds < 60 || raw.CacheSkewSeconds >= 3600 {
-			return nil, fmt.Errorf("cache_skew_seconds must be between 60 and 3599")
+	for i := range c.Policies {
+		policy := &c.Policies[i]
+		if policy.SPIFFEID.IsZero() {
+			return fmt.Errorf("policies[%d].spiffe_id is required", i)
 		}
-		cacheSkew = time.Duration(raw.CacheSkewSeconds) * time.Second
-	}
-
-	if raw.GitHub.AppID <= 0 {
-		return nil, fmt.Errorf("github.app_id is required")
-	}
-	if raw.GitHub.InstallationID <= 0 {
-		return nil, fmt.Errorf("github.installation_id is required")
-	}
-	if raw.GitHub.PrivateKeyFile == "" {
-		return nil, fmt.Errorf("github.private_key_file is required")
-	}
-	if raw.GitHub.APIURL == "" {
-		raw.GitHub.APIURL = githubapi.DefaultAPIURL
-	}
-	keyBytes, err := os.ReadFile(raw.GitHub.PrivateKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("read github.private_key_file: %w", err)
-	}
-	key, err := githubapi.ParsePrivateKey(keyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("github private key: %w", err)
-	}
-
-	if len(raw.Policies) == 0 {
-		return nil, fmt.Errorf("at least one policy is required")
-	}
-	policies := make([]Policy, 0, len(raw.Policies))
-	for i, rp := range raw.Policies {
-		if rp.SPIFFEID == "" {
-			return nil, fmt.Errorf("policies[%d].spiffe_id is required", i)
+		if policy.SPIFFEID.TrustDomain().String() != c.TrustDomain.String() {
+			return fmt.Errorf("policies[%d].spiffe_id is outside trust domain %s", i, c.TrustDomain)
 		}
-		id, err := spiffeid.FromString(rp.SPIFFEID)
-		if err != nil {
-			return nil, fmt.Errorf("policies[%d].spiffe_id: %w", i, err)
+		if policy.InstallationID == 0 {
+			policy.InstallationID = c.GitHub.InstallationID
 		}
-		if id.TrustDomain().String() != trustDomain.String() {
-			return nil, fmt.Errorf("policies[%d].spiffe_id is outside trust domain %s", i, trustDomain)
+		if policy.InstallationID <= 0 {
+			return fmt.Errorf("policies[%d].installation_id is required", i)
 		}
-		installationID := rp.InstallationID
-		if installationID == 0 {
-			installationID = raw.GitHub.InstallationID
+		if len(policy.Repositories) == 0 {
+			return fmt.Errorf("policies[%d].repositories is required", i)
 		}
-		if len(rp.Repositories) == 0 {
-			return nil, fmt.Errorf("policies[%d].repositories is required", i)
-		}
-		if len(rp.Permissions) == 0 {
-			return nil, fmt.Errorf("policies[%d].permissions is required", i)
-		}
-		for name, value := range rp.Permissions {
-			if rank, ok := permissionRank(value); !ok || rank < 1 {
-				return nil, fmt.Errorf("policies[%d].permissions[%q] must be read or write", i, name)
+		for _, repository := range policy.Repositories {
+			if !validRepository(repository) {
+				return fmt.Errorf("policies[%d].repositories contains invalid %q (want owner/repo)", i, repository)
 			}
 		}
-		policies = append(policies, Policy{
-			SPIFFEID:       id,
-			InstallationID: installationID,
-			Repositories:   append([]string(nil), rp.Repositories...),
-			Permissions:    clonePermissions(rp.Permissions),
-		})
+		if len(policy.Permissions) == 0 {
+			return fmt.Errorf("policies[%d].permissions is required", i)
+		}
+		for name, value := range policy.Permissions {
+			if _, ok := permissionRank(value); !ok {
+				return fmt.Errorf("policies[%d].permissions[%q] must be read or write", i, name)
+			}
+		}
+	}
+	return nil
+}
+
+// ParsePolicy parses one repeatable -policy flag:
+//
+//	spiffe_id=spiffe://example.org/agent/opencode;repositories=owner/a,owner/b;permissions=contents=write,pull_requests=write
+//
+// installation_id is optional and defaults to the global -installation-id.
+func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallationID int64) (Policy, error) {
+	var (
+		policy     Policy
+		spiffeRaw  string
+		reposRaw   string
+		permsRaw   string
+		installRaw string
+	)
+	for _, field := range strings.Split(raw, ";") {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return Policy{}, fmt.Errorf("policy field %q must be key=value", field)
+		}
+		switch strings.TrimSpace(key) {
+		case "spiffe_id":
+			spiffeRaw = strings.TrimSpace(value)
+		case "repositories":
+			reposRaw = strings.TrimSpace(value)
+		case "permissions":
+			permsRaw = strings.TrimSpace(value)
+		case "installation_id":
+			installRaw = strings.TrimSpace(value)
+		default:
+			return Policy{}, fmt.Errorf("unknown policy field %q", key)
+		}
 	}
 
-	return &Config{
-		ListenAddr:  raw.ListenAddr,
-		TrustDomain: trustDomain,
-		CacheSkew:   cacheSkew,
-		GitHub:      raw.GitHub,
-		Key:         key,
-		Policies:    policies,
-	}, nil
+	if spiffeRaw == "" {
+		return Policy{}, fmt.Errorf("policy is missing spiffe_id")
+	}
+	id, err := spiffeid.FromString(spiffeRaw)
+	if err != nil {
+		return Policy{}, fmt.Errorf("spiffe_id: %w", err)
+	}
+	if id.TrustDomain().String() != trustDomain.String() {
+		return Policy{}, fmt.Errorf("spiffe_id is outside trust domain %s", trustDomain)
+	}
+	if reposRaw == "" {
+		return Policy{}, fmt.Errorf("policy is missing repositories")
+	}
+	for _, repo := range strings.Split(reposRaw, ",") {
+		repo = strings.TrimSpace(repo)
+		if !validRepository(repo) {
+			return Policy{}, fmt.Errorf("invalid repository %q (want owner/repo)", repo)
+		}
+		policy.Repositories = append(policy.Repositories, repo)
+	}
+	if permsRaw == "" {
+		return Policy{}, fmt.Errorf("policy is missing permissions")
+	}
+	policy.Permissions = make(map[string]string)
+	for _, pair := range strings.Split(permsRaw, ",") {
+		name, value, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(value) == "" {
+			return Policy{}, fmt.Errorf("permission %q must be name=read|write", pair)
+		}
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if _, ok := permissionRank(value); !ok {
+			return Policy{}, fmt.Errorf("permission %q must be read or write", value)
+		}
+		policy.Permissions[name] = value
+	}
+
+	policy.SPIFFEID = id
+	policy.InstallationID = defaultInstallationID
+	if installRaw != "" {
+		installationID, err := strconv.ParseInt(installRaw, 10, 64)
+		if err != nil || installationID <= 0 {
+			return Policy{}, fmt.Errorf("installation_id %q is invalid", installRaw)
+		}
+		policy.InstallationID = installationID
+	}
+	return policy, nil
+}
+
+// ParsePolicies parses all repeatable -policy flags.
+func ParsePolicies(raw []string, trustDomain spiffeid.TrustDomain, defaultInstallationID int64) ([]Policy, error) {
+	policies := make([]Policy, 0, len(raw))
+	for i, value := range raw {
+		policy, err := ParsePolicy(value, trustDomain, defaultInstallationID)
+		if err != nil {
+			return nil, fmt.Errorf("policy[%d]: %w", i, err)
+		}
+		policies = append(policies, policy)
+	}
+	return policies, nil
+}
+
+func validRepository(repository string) bool {
+	if repository == "" || strings.Contains(repository, "..") {
+		return false
+	}
+	parts := strings.Split(repository, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }
