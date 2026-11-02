@@ -1,5 +1,10 @@
 # github-token-broker
 
+> **Disclaimer:** This project is entirely vibe-coded. It has not been
+> independently security-reviewed, audited, fuzzed, or production-hardened.
+> Treat it as a prototype and obtain an independent review before using it with
+> real credentials.
+
 A small SPIFFE-mTLS gRPC service that mints scoped GitHub App installation
 tokens for workloads. Agents authenticate with their X509-SVID; the GitHub App
 private key stays on the broker. The API is protobuf, not JSON.
@@ -18,6 +23,19 @@ agent (X509-SVID) ── mTLS ──> broker ── GitHub App JWT ──> insta
 - Tokens are installation tokens, scoped to a repository and a subset of the
   App's permissions.
 - Tokens are cached in broker memory until shortly before their one-hour expiry.
+
+## Status and known limitations
+
+- The branch-protection guard described in the security notes is **not
+  implemented yet**. A policy that grants `contents: write` can mint a token
+  that pushes to an unprotected default branch.
+- The issued GitHub token is a bearer token. SPIFFE mTLS authenticates the
+  request to the broker; it does not bind the token to the client after issue.
+- There is no token revocation, rate limiting, metrics endpoint, or persistent
+  audit log yet.
+- The gRPC API and policy format are not yet stable.
+- The repository has no license file yet, so it is not currently reusable as
+  open source.
 
 ## Dependencies
 
