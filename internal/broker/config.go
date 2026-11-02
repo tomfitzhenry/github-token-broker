@@ -12,8 +12,8 @@ import (
 	"github.com/tomfitzhenry/github-token-broker/internal/githubapi"
 )
 
-// Config is the broker configuration. It is JSON so the only dependency
-// beyond go-spiffe is the standard library.
+// Config is the broker configuration. It is parsed from JSON with the standard
+// library; no configuration framework is used.
 type Config struct {
 	ListenAddr  string
 	TrustDomain spiffeid.TrustDomain

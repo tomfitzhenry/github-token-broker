@@ -1,8 +1,8 @@
 # github-token-broker
 
-A small SPIFFE-mTLS HTTP service that mints scoped GitHub App installation
+A small SPIFFE-mTLS gRPC service that mints scoped GitHub App installation
 tokens for workloads. Agents authenticate with their X509-SVID; the GitHub App
-private key stays on the broker.
+private key stays on the broker. The API is protobuf, not JSON.
 
 ```
 agent (X509-SVID) ── mTLS ──> broker ── GitHub App JWT ──> installation token
@@ -21,8 +21,10 @@ agent (X509-SVID) ── mTLS ──> broker ── GitHub App JWT ──> insta
 
 ## Dependencies
 
-Only [`github.com/spiffe/go-spiffe/v2`](https://github.com/spiffe/go-spiffe) is
-used beyond the Go standard library.
+[`github.com/spiffe/go-spiffe/v2`](https://github.com/spiffe/go-spiffe) provides
+the Workload API and SPIFFE transport credentials. `google.golang.org/grpc` and
+`google.golang.org/protobuf` provide the gRPC transport and generated types.
+Everything else is the Go standard library.
 
 ## Build
 
@@ -31,6 +33,18 @@ go build -o bin/github-token-broker ./cmd/github-token-broker
 go build -o bin/agent-token ./cmd/agent-token
 go test ./...
 ```
+
+The generated protobuf and gRPC files are committed. To regenerate them:
+
+```sh
+protoc -I proto -I <protobuf-include> \
+  --go_out=gen --go_opt=paths=source_relative \
+  --go-grpc_out=gen --go-grpc_opt=paths=source_relative \
+  proto/tokenbroker/v1/token_broker.proto
+```
+
+On NixOS, `<protobuf-include>` can be
+`$(nix eval --raw nixpkgs#protobuf)/include`.
 
 ## GitHub App
 
@@ -107,30 +121,41 @@ sudo install -m 600 config.json /etc/github-token-broker/config.json
 The process needs access to the SPIRE Workload API socket
 (`SPIFFE_ENDPOINT_SOCKET`, normally `/run/spire/sockets/agent.sock`).
 
-## HTTP API
+## gRPC API
 
-`POST /v1/token`, authenticated by mTLS:
+The service is defined in
+[`proto/tokenbroker/v1/token_broker.proto`](./proto/tokenbroker/v1/token_broker.proto):
 
-```json
-{
-  "repository": "owner/repo",
-  "permissions": {
-    "contents": "write",
-    "pull_requests": "write"
-  }
+```proto
+service TokenBroker {
+  rpc MintToken(MintTokenRequest) returns (MintTokenResponse);
+}
+
+message MintTokenRequest {
+  string repository = 1;
+  map<string, string> permissions = 2;
+}
+
+message MintTokenResponse {
+  string token = 1;
+  google.protobuf.Timestamp expires_at = 2;
 }
 ```
 
-Response:
+The broker selects the installation ID from policy; the client cannot request
+an arbitrary installation. An empty `permissions` map means all permissions in
+the matching policy. Values are `read` or `write`, and a requested permission
+must be present in the policy and no stronger than the policy value.
 
-```json
-{
-  "token": "ghs_...",
-  "expires_at": "2026-11-02T12:00:00Z"
-}
-```
+gRPC status mapping:
 
-`/healthz` returns 204 over the same mTLS listener.
+- `InvalidArgument`: malformed request, missing repository, invalid permission.
+- `Unauthenticated`: no client SVID (normally the mTLS handshake already fails).
+- `PermissionDenied`: SPIFFE ID, repository, or permission not allowed.
+- `Unavailable`: GitHub token mint failed.
+- `ResourceExhausted`: expected for future rate limiting.
+
+The standard `grpc.health.v1.Health` service is registered on the same listener.
 
 ## Agent use
 
@@ -138,7 +163,7 @@ Git:
 
 ```sh
 bin/agent-token exec \
-  --broker https://github-token-broker:8443 \
+  --broker github-token-broker:8443 \
   --server-id spiffe://example.org/github-token-broker \
   --repository example/repo \
   --permission contents=write \
@@ -150,7 +175,7 @@ bin/agent-token exec \
 
 ```sh
 bin/agent-token exec \
-  --broker https://github-token-broker:8443 \
+  --broker github-token-broker:8443 \
   --server-id spiffe://example.org/github-token-broker \
   --repository example/repo \
   --permission contents=write \
@@ -158,7 +183,8 @@ bin/agent-token exec \
   -- gh pr create --base master --head chore/example
 ```
 
-`agent-token exec` sets `GH_TOKEN`/`GITHUB_TOKEN`, a temporary `GIT_ASKPASS`,
+`--broker` is a gRPC target (`host:port`), not a URL. `agent-token exec` sets
+`GH_TOKEN`/`GITHUB_TOKEN`, a temporary `GIT_ASKPASS`,
 and clears GitHub credential helpers so the token comes from the broker rather
 than the local user’s credentials.
 

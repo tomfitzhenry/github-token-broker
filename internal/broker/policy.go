@@ -13,7 +13,7 @@ import (
 // covered by its policy.
 var ErrForbidden = errors.New("requested scope is not permitted")
 
-// TokenRequest is the HTTP request body for POST /v1/token.
+// TokenRequest is the authorization input for a MintToken RPC.
 type TokenRequest struct {
 	Repository  string            `json:"repository"`
 	Permissions map[string]string `json:"permissions,omitempty"`

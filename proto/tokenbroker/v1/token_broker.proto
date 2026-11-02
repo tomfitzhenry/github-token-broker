@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package tokenbroker.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/tomfitzhenry/github-token-broker/gen/tokenbroker/v1;tokenbrokerv1";
+
+// TokenBroker mints repository- and permission-scoped GitHub App installation
+// tokens for authenticated SPIFFE workloads.
+service TokenBroker {
+  rpc MintToken(MintTokenRequest) returns (MintTokenResponse);
+}
+
+message MintTokenRequest {
+  // owner/repo. The broker maps this to the repository name GitHub expects.
+  string repository = 1;
+
+  // Requested subset of the policy permissions. Empty means all permissions
+  // granted by the matching policy. Values are "read" or "write".
+  map<string, string> permissions = 2;
+}
+
+message MintTokenResponse {
+  string token = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}

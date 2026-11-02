@@ -17,15 +17,15 @@ import (
 const usage = `agent-token - obtain a scoped GitHub token from the SPIFFE broker
 
 Usage:
-  agent-token token --broker URL --server-id SPIFFE_ID --repository OWNER/REPO [flags]
-  agent-token exec  --broker URL --server-id SPIFFE_ID --repository OWNER/REPO [flags] -- COMMAND...
+  agent-token token --broker ADDR --server-id SPIFFE_ID --repository OWNER/REPO [flags]
+  agent-token exec  --broker ADDR --server-id SPIFFE_ID --repository OWNER/REPO [flags] -- COMMAND...
   agent-token -h
 
 The client obtains an X509-SVID from the local SPIRE agent, uses it for mTLS,
-and asks the broker for a short-lived GitHub App installation token.
+and asks the broker over gRPC for a short-lived GitHub App installation token.
 
 Flags common to both commands:
-  --broker URL          broker base URL, e.g. https://github-broker:8443
+  --broker ADDR         broker gRPC address, e.g. github-broker:8443
   --server-id ID        broker SPIFFE ID, e.g. spiffe://example.org/github-broker
   --repository REPO     owner/repo to scope the token to
   --permission KEY=VAL  requested permission, repeatable (default: policy defaults)
@@ -66,7 +66,7 @@ type options struct {
 }
 
 func addFlags(fs *flag.FlagSet, opts *options) {
-	fs.StringVar(&opts.broker, "broker", "", "broker base URL")
+	fs.StringVar(&opts.broker, "broker", "", "broker gRPC address (host:port)")
 	fs.StringVar(&opts.serverID, "server-id", "", "broker SPIFFE ID")
 	fs.StringVar(&opts.repository, "repository", "", "owner/repo to scope the token to")
 	fs.Var(&opts.permissions, "permission", "requested permission KEY=VALUE (repeatable)")

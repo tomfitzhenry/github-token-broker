@@ -2,28 +2,35 @@ package broker
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/spiffegrpc/grpccredentials"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
+	tokenbrokerv1 "github.com/tomfitzhenry/github-token-broker/gen/tokenbroker/v1"
 	"github.com/tomfitzhenry/github-token-broker/internal/githubapi"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type cacheEntry struct {
 	token     string
 	expiresAt time.Time
 }
+
+type peerIDKey struct{}
 
 // Broker serves scoped GitHub App installation tokens over SPIFFE mTLS.
 type Broker struct {
@@ -66,115 +73,108 @@ func (b *Broker) Run(ctx context.Context) error {
 	}
 	b.log.Info("broker identity", "spiffe_id", svid.ID.String())
 
-	tlsConfig := tlsconfig.MTLSServerConfig(
+	creds := grpccredentials.MTLSServerCredentials(
 		source,
 		source,
 		tlsconfig.AuthorizeMemberOf(b.cfg.TrustDomain),
 	)
-
 	listener, err := net.Listen("tcp", b.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	tlsListener := tls.NewListener(listener, tlsConfig)
 
-	server := &http.Server{
-		Handler:           b.routes(),
-		TLSConfig:         tlsConfig,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	server := grpc.NewServer(
+		grpc.Creds(creds),
+		grpc.UnaryInterceptor(b.authInterceptor),
+		grpc.MaxRecvMsgSize(64<<10),
+	)
+	tokenbrokerv1.RegisterTokenBrokerServer(server, &tokenService{broker: b})
+
+	healthServer := health.NewServer()
+	healthpb.RegisterHealthServer(server, healthServer)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 
 	errCh := make(chan error, 1)
 	go func() {
 		b.log.Info("listening", "addr", b.cfg.ListenAddr)
-		errCh <- server.Serve(tlsListener)
+		errCh <- server.Serve(listener)
 	}()
 
 	select {
 	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
+		if errors.Is(err, grpc.ErrServerStopped) {
 			return nil
 		}
 		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown: %w", err)
+		healthServer.Shutdown()
+		stopped := make(chan struct{})
+		go func() {
+			server.GracefulStop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(10 * time.Second):
+			server.Stop()
 		}
 		return nil
 	}
 }
 
-func (b *Broker) routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-	mux.HandleFunc("/v1/token", b.handleToken)
-	return mux
+func (b *Broker) authInterceptor(
+	ctx context.Context,
+	req any,
+	_ *grpc.UnaryServerInfo,
+	handler grpc.UnaryHandler,
+) (any, error) {
+	id, ok := grpccredentials.PeerIDFromContext(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "client SVID required")
+	}
+	return handler(context.WithValue(ctx, peerIDKey{}, id), req)
 }
 
-func (b *Broker) handleToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+type tokenService struct {
+	tokenbrokerv1.UnimplementedTokenBrokerServer
+	broker *Broker
+}
+
+func (s *tokenService) MintToken(ctx context.Context, req *tokenbrokerv1.MintTokenRequest) (*tokenbrokerv1.MintTokenResponse, error) {
+	id, ok := ctx.Value(peerIDKey{}).(spiffeid.ID)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "client SVID required")
 	}
 
-	id, err := peerSPIFFEID(r)
-	if err != nil {
-		http.Error(w, "client SVID required", http.StatusUnauthorized)
-		return
-	}
-
-	defer r.Body.Close()
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
-	decoder.DisallowUnknownFields()
-	var req TokenRequest
-	if err := decoder.Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
-		return
-	}
-	if decoder.More() {
-		http.Error(w, "trailing JSON data", http.StatusBadRequest)
-		return
-	}
-
-	policy, permissions, err := b.cfg.Authorize(id, req)
+	policy, permissions, err := s.broker.cfg.Authorize(id, TokenRequest{
+		Repository:  req.GetRepository(),
+		Permissions: req.GetPermissions(),
+	})
 	if errors.Is(err, ErrForbidden) {
-		b.log.Warn("denied token request", "spiffe_id", id.String(), "repository", req.Repository)
-		http.Error(w, "requested scope is not permitted", http.StatusForbidden)
-		return
+		s.broker.log.Warn("denied token request", "spiffe_id", id.String(), "repository", req.GetRepository())
+		return nil, status.Error(codes.PermissionDenied, "requested scope is not permitted")
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	token, err := b.mint(r.Context(), id, policy, req.Repository, permissions)
+	token, err := s.broker.mint(ctx, id, policy, req.GetRepository(), permissions)
 	if err != nil {
-		b.log.Error("mint token", "spiffe_id", id.String(), "repository", req.Repository, "error", err)
-		http.Error(w, "could not mint GitHub token", http.StatusBadGateway)
-		return
+		s.broker.log.Error("mint token", "spiffe_id", id.String(), "repository", req.GetRepository(), "error", err)
+		return nil, status.Error(codes.Unavailable, "could not mint GitHub token")
 	}
 
-	b.log.Info(
+	s.broker.log.Info(
 		"issued token",
 		"spiffe_id", id.String(),
-		"repository", req.Repository,
+		"repository", req.GetRepository(),
 		"permissions", permissionKey(permissions),
 		"expires_at", token.ExpiresAt,
 	)
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(struct {
-		Token     string    `json:"token"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}{Token: token.Token, ExpiresAt: token.ExpiresAt})
+	return &tokenbrokerv1.MintTokenResponse{
+		Token:     token.Token,
+		ExpiresAt: timestamppb.New(token.ExpiresAt),
+	}, nil
 }
 
 func (b *Broker) mint(
@@ -204,19 +204,4 @@ func (b *Broker) mint(
 	}
 	b.cache[key] = cacheEntry{token: token.Token, expiresAt: token.ExpiresAt}
 	return token, nil
-}
-
-func peerSPIFFEID(r *http.Request) (spiffeid.ID, error) {
-	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		return spiffeid.ID{}, errors.New("no peer certificate")
-	}
-	for _, cert := range r.TLS.PeerCertificates {
-		for _, uri := range cert.URIs {
-			id, err := spiffeid.FromURI(uri)
-			if err == nil {
-				return id, nil
-			}
-		}
-	}
-	return spiffeid.ID{}, errors.New("no SPIFFE ID in peer certificate")
 }

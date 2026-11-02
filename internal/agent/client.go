@@ -1,49 +1,35 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/spiffegrpc/grpccredentials"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
+	tokenbrokerv1 "github.com/tomfitzhenry/github-token-broker/gen/tokenbroker/v1"
+	"google.golang.org/grpc"
 )
 
 // Token is a scoped GitHub installation token returned by the broker.
 type Token struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-type tokenRequest struct {
-	Repository  string            `json:"repository"`
-	Permissions map[string]string `json:"permissions,omitempty"`
+	Token     string
+	ExpiresAt time.Time
 }
 
 // Client obtains tokens from the broker over SPIFFE mTLS.
 type Client struct {
-	endpoint string
-	http     *http.Client
-	source   *workloadapi.X509Source
+	conn   *grpc.ClientConn
+	source *workloadapi.X509Source
+	client tokenbrokerv1.TokenBrokerClient
 }
 
 // New creates a client using the workload's X509-SVID and verifies that the
-// broker presents the expected SPIFFE ID.
-func New(ctx context.Context, brokerURL, serverID string) (*Client, error) {
-	parsed, err := url.Parse(brokerURL)
-	if err != nil {
-		return nil, fmt.Errorf("broker URL: %w", err)
-	}
-	if parsed.Scheme != "https" {
-		return nil, fmt.Errorf("broker URL must use https")
-	}
+// broker presents the expected SPIFFE ID. brokerAddr is a gRPC target such as
+// "github-broker:8443".
+func New(ctx context.Context, brokerAddr, serverID string) (*Client, error) {
 	id, err := spiffeid.FromString(serverID)
 	if err != nil {
 		return nil, fmt.Errorf("server SPIFFE ID: %w", err)
@@ -52,54 +38,53 @@ func New(ctx context.Context, brokerURL, serverID string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("SPIFFE Workload API: %w", err)
 	}
-	tlsConfig := tlsconfig.MTLSClientConfig(source, source, tlsconfig.AuthorizeID(id))
+	creds := grpccredentials.MTLSClientCredentials(
+		source,
+		source,
+		tlsconfig.AuthorizeID(id),
+	)
+	conn, err := grpc.NewClient(
+		brokerAddr,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<10)),
+	)
+	if err != nil {
+		source.Close()
+		return nil, fmt.Errorf("connect to broker: %w", err)
+	}
 	return &Client{
-		endpoint: strings.TrimRight(brokerURL, "/") + "/v1/token",
-		http: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: tlsConfig},
-		},
+		conn:   conn,
 		source: source,
+		client: tokenbrokerv1.NewTokenBrokerClient(conn),
 	}, nil
 }
 
-// Close releases the Workload API source.
+// Close releases the gRPC connection and Workload API source.
 func (c *Client) Close() error {
-	if c.source == nil {
-		return nil
+	var first error
+	if c.conn != nil {
+		first = c.conn.Close()
 	}
-	return c.source.Close()
+	if c.source != nil {
+		if err := c.source.Close(); first == nil && err != nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // Token requests a token scoped to one repository and permission set.
 func (c *Client) Token(ctx context.Context, repository string, permissions map[string]string) (Token, error) {
-	body, err := json.Marshal(tokenRequest{Repository: repository, Permissions: permissions})
+	resp, err := c.client.MintToken(ctx, &tokenbrokerv1.MintTokenRequest{
+		Repository:  repository,
+		Permissions: permissions,
+	})
 	if err != nil {
 		return Token{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return Token{}, err
+	expiresAt := time.Time{}
+	if ts := resp.GetExpiresAt(); ts != nil {
+		expiresAt = ts.AsTime()
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return Token{}, err
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return Token{}, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return Token{}, fmt.Errorf("broker returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	var token Token
-	if err := json.Unmarshal(respBody, &token); err != nil {
-		return Token{}, fmt.Errorf("decode broker response: %w", err)
-	}
-	if token.Token == "" {
-		return Token{}, fmt.Errorf("broker returned an empty token")
-	}
-	return token, nil
+	return Token{Token: resp.GetToken(), ExpiresAt: expiresAt}, nil
 }
