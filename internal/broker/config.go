@@ -32,7 +32,6 @@ type GitHubConfig struct {
 type Policy struct {
 	SPIFFEID       spiffeid.ID
 	InstallationID int64
-	Repositories   []string
 	Permissions    map[string]string
 }
 
@@ -93,14 +92,6 @@ func (c *Config) Validate() error {
 		if policy.InstallationID <= 0 {
 			return fmt.Errorf("policies[%d].installation_id is required", i)
 		}
-		if len(policy.Repositories) == 0 {
-			return fmt.Errorf("policies[%d].repositories is required", i)
-		}
-		for _, repository := range policy.Repositories {
-			if !validRepository(repository) {
-				return fmt.Errorf("policies[%d].repositories contains invalid %q (want owner/repo)", i, repository)
-			}
-		}
 		if len(policy.Permissions) == 0 {
 			return fmt.Errorf("policies[%d].permissions is required", i)
 		}
@@ -115,14 +106,15 @@ func (c *Config) Validate() error {
 
 // ParsePolicy parses one repeatable -policy flag:
 //
-//	spiffe_id=spiffe://example.org/agent/opencode;repositories=owner/a,owner/b;permissions=contents=write,pull_requests=write
+//	spiffe_id=spiffe://example.org/agent/opencode;permissions=contents=write,pull_requests=write
 //
-// installation_id is optional and defaults to the global -installation-id.
+// The GitHub App installation determines which repositories are available; a
+// policy only grants permissions. installation_id is optional and defaults to
+// the global -installation-id.
 func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallationID int64) (Policy, error) {
 	var (
 		policy     Policy
 		spiffeRaw  string
-		reposRaw   string
 		permsRaw   string
 		installRaw string
 	)
@@ -134,8 +126,6 @@ func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallati
 		switch strings.TrimSpace(key) {
 		case "spiffe_id":
 			spiffeRaw = strings.TrimSpace(value)
-		case "repositories":
-			reposRaw = strings.TrimSpace(value)
 		case "permissions":
 			permsRaw = strings.TrimSpace(value)
 		case "installation_id":
@@ -154,16 +144,6 @@ func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallati
 	}
 	if id.TrustDomain().String() != trustDomain.String() {
 		return Policy{}, fmt.Errorf("spiffe_id is outside trust domain %s", trustDomain)
-	}
-	if reposRaw == "" {
-		return Policy{}, fmt.Errorf("policy is missing repositories")
-	}
-	for _, repo := range strings.Split(reposRaw, ",") {
-		repo = strings.TrimSpace(repo)
-		if !validRepository(repo) {
-			return Policy{}, fmt.Errorf("invalid repository %q (want owner/repo)", repo)
-		}
-		policy.Repositories = append(policy.Repositories, repo)
 	}
 	if permsRaw == "" {
 		return Policy{}, fmt.Errorf("policy is missing permissions")

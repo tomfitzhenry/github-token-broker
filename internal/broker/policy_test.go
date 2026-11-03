@@ -23,13 +23,11 @@ func TestAuthorize(t *testing.T) {
 		{
 			SPIFFEID:       writer,
 			InstallationID: 7,
-			Repositories:   []string{"example/repo"},
 			Permissions:    map[string]string{"contents": "write", "pull_requests": "write"},
 		},
 		{
 			SPIFFEID:       reader,
 			InstallationID: 7,
-			Repositories:   []string{"example/repo"},
 			Permissions:    map[string]string{"contents": "read"},
 		},
 	}}
@@ -57,7 +55,21 @@ func TestAuthorize(t *testing.T) {
 		t.Fatalf("reader write error = %v, want forbidden", err)
 	}
 
-	if _, _, err := cfg.Authorize(writer, TokenRequest{Repository: "other/repo"}); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("wrong repo error = %v, want forbidden", err)
+	// The broker does not restrict which repositories a policy covers; the
+	// GitHub App installation does. Any valid owner/repo is allowed.
+	policy, perms, err = cfg.Authorize(writer, TokenRequest{Repository: "other/repo"})
+	if err != nil {
+		t.Fatalf("other repo: %v", err)
+	}
+	if policy.InstallationID != 7 || perms["contents"] != "write" {
+		t.Fatalf("other repo policy = %+v perms = %v", policy, perms)
+	}
+
+	if _, _, err := cfg.Authorize(writer, TokenRequest{Repository: "no-slash"}); err == nil || errors.Is(err, ErrForbidden) {
+		t.Fatalf("malformed repo error = %v, want a non-forbidden error", err)
+	}
+
+	if _, _, err := cfg.Authorize(writer, TokenRequest{}); err == nil || errors.Is(err, ErrForbidden) {
+		t.Fatalf("empty repo error = %v, want a non-forbidden error", err)
 	}
 }

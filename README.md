@@ -22,6 +22,8 @@ agent (X509-SVID) ── mTLS ──> broker ── GitHub App JWT ──> insta
 - The GitHub App private key never leaves the broker.
 - Tokens are installation tokens, scoped to a repository and a subset of the
   App's permissions.
+- Policies bind a SPIFFE ID to a permission set. The GitHub App installation is
+  the repository allowlist; the broker keeps no per-policy repository list.
 - Tokens are cached in broker memory until shortly before their one-hour expiry.
 
 ## Status and known limitations
@@ -31,6 +33,10 @@ agent (X509-SVID) ── mTLS ──> broker ── GitHub App JWT ──> insta
   that pushes to an unprotected default branch.
 - The issued GitHub token is a bearer token. SPIFFE mTLS authenticates the
   request to the broker; it does not bind the token to the client after issue.
+- Repository scope comes from the GitHub App installation, not from policies.
+  Any identity whose policy grants a permission can request a token for any
+  repository the installation covers, subject only to that permission. Install
+  the App only on the repositories the broker should be able to reach.
 - There is no token revocation, rate limiting, metrics endpoint, or persistent
   audit log yet.
 - The gRPC API and policy format are not yet stable.
@@ -73,7 +79,8 @@ Create a GitHub App with:
   - Pull requests: Read and write
   - Metadata: Read-only
 - No Administration, Actions, or Workflows permissions.
-- Installed only on the repositories the broker should be able to scope to.
+- Installed only on the repositories the broker should be able to scope to. The
+  installation is the repository allowlist; policies do not list repositories.
 
 Generate an **RSA** private key. GitHub App JWT authentication is RS256; ECDSA
 App keys are not supported. The SPIFFE/mTLS side can and normally does use
@@ -127,7 +134,7 @@ There is no config file; everything is a flag.
 A policy is:
 
 ```text
-spiffe_id=SPIFFE_ID;repositories=owner/repo[,owner/repo...];permissions=name=read|write[,name=read|write...][;installation_id=N]
+spiffe_id=SPIFFE_ID;permissions=name=read|write[,name=read|write...][;installation_id=N]
 ```
 
 Example:
@@ -138,19 +145,17 @@ Example:
   -app-id 123456 \
   -installation-id 789012 \
   -private-key /etc/github-token-broker/app.pem \
-  -policy 'spiffe_id=spiffe://example.org/agent/opencode;repositories=example/repo,owner/other;permissions=contents=write,pull_requests=write' \
-  -policy 'spiffe_id=spiffe://example.org/agent/readonly;repositories=example/repo;permissions=contents=read'
+  -policy 'spiffe_id=spiffe://example.org/agent/opencode;permissions=contents=write,pull_requests=write' \
+  -policy 'spiffe_id=spiffe://example.org/agent/readonly;permissions=contents=read'
 ```
 
 An empty requested permission set means “all permissions in the matching
 policy”. A requested permission must be present in the policy and no stronger
-than the policy value (`read` < `write`). A request for another repository is
-forbidden. A policy may override the global `-installation-id` with
-`;installation_id=N`.
-
-Each token is still scoped to one repository. Listing several repositories in a
-policy means the agent may request any of them, not that one token covers all of
-them.
+than the policy value (`read` < `write`). A policy only grants permissions; the
+GitHub App installation restricts which repositories are available. Each token
+is scoped to the one repository named in the request, and the requested
+repository must be a valid `owner/repo` name. A policy may override the global
+`-installation-id` with `;installation_id=N`.
 
 ## Run
 
@@ -163,7 +168,7 @@ sudo install -m 600 app.pem /etc/github-token-broker/app.pem
   -app-id 123456 \
   -installation-id 789012 \
   -private-key /etc/github-token-broker/app.pem \
-  -policy 'spiffe_id=spiffe://example.org/agent/opencode;repositories=example/repo;permissions=contents=write,pull_requests=write'
+  -policy 'spiffe_id=spiffe://example.org/agent/opencode;permissions=contents=write,pull_requests=write'
 ```
 
 The process needs access to the SPIRE Workload API socket
@@ -196,7 +201,6 @@ services.github-token-broker = {
   policies = [
     {
       spiffeID = "spiffe://example.org/agent/opencode";
-      repositories = [ "example/repo" ];
       permissions = {
         contents = "write";
         pull_requests = "write";
@@ -230,7 +234,9 @@ the agent socket is elsewhere.
 
 It verifies that the broker and client get X509-SVIDs, that the broker mints a
 repository/permission-scoped token, that the fake GitHub API receives the
-expected scoped request, and that a policy-denied permission is rejected.
+expected scoped request, that a different repository is now accepted (the broker
+no longer keeps a per-policy repository allowlist), and that a policy-denied
+permission is rejected.
 
 ## gRPC API
 
@@ -260,9 +266,10 @@ must be present in the policy and no stronger than the policy value.
 
 gRPC status mapping:
 
-- `InvalidArgument`: malformed request, missing repository, invalid permission.
+- `InvalidArgument`: malformed request, missing or malformed repository
+  (`owner/repo`), invalid permission.
 - `Unauthenticated`: no client SVID (normally the mTLS handshake already fails).
-- `PermissionDenied`: SPIFFE ID, repository, or permission not allowed.
+- `PermissionDenied`: SPIFFE ID or permission not covered by a policy.
 - `Unavailable`: GitHub token mint failed.
 - `ResourceExhausted`: expected for future rate limiting.
 
@@ -361,6 +368,9 @@ Configuration is entirely environment-driven:
   protect the key and config, restrict network access, and audit its logs.
 - Do not grant the App Administration. The App token should be unable to change
   branch protection or repository settings.
+- The GitHub App installation is the repository allowlist. Install it only on
+  the repositories the broker should be able to reach; a workload with a
+  `contents: write` policy can mint a token for any of them.
 - Use branch protection on the default branch. The App’s Contents write lets it
   push branches; the broker scopes tokens but cannot prevent a correctly scoped
   write token from updating `master` unless branch protection blocks it.

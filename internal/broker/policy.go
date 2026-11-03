@@ -9,8 +9,9 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 
-// ErrForbidden means the SPIFFE identity exists but the requested scope is not
-// covered by its policy.
+// ErrForbidden means the SPIFFE identity exists but the requested permission
+// scope is not covered by its policy. The broker does not restrict which
+// repositories a policy can cover; the GitHub App installation does.
 var ErrForbidden = errors.New("requested scope is not permitted")
 
 // TokenRequest is the authorization input for a MintToken RPC.
@@ -19,17 +20,22 @@ type TokenRequest struct {
 	Permissions map[string]string `json:"permissions,omitempty"`
 }
 
-// Authorize returns the policy and the exact permission set to mint. An empty
-// request permission set means "all permissions granted to this identity for
-// this repository".
+// Authorize returns the policy and the exact permission set to mint. The
+// requested repository must be a valid owner/repo name; the GitHub App
+// installation, not the broker, restricts which repositories a policy can
+// cover. An empty request permission set means "all permissions granted to
+// this identity".
 func (c *Config) Authorize(id spiffeid.ID, req TokenRequest) (Policy, map[string]string, error) {
 	repository := strings.TrimSpace(req.Repository)
 	if repository == "" {
 		return Policy{}, nil, fmt.Errorf("repository is required")
 	}
+	if !validRepository(repository) {
+		return Policy{}, nil, fmt.Errorf("repository %q must be owner/repo", repository)
+	}
 
 	for _, policy := range c.Policies {
-		if policy.SPIFFEID.String() != id.String() || !repositoryAllowed(policy.Repositories, repository) {
+		if policy.SPIFFEID.String() != id.String() {
 			continue
 		}
 		permissions := policy.Permissions
@@ -53,15 +59,6 @@ func (c *Config) Authorize(id spiffeid.ID, req TokenRequest) (Policy, map[string
 		return policy, clonePermissions(permissions), nil
 	}
 	return Policy{}, nil, ErrForbidden
-}
-
-func repositoryAllowed(allowed []string, repository string) bool {
-	for _, candidate := range allowed {
-		if strings.EqualFold(candidate, repository) {
-			return true
-		}
-	}
-	return false
 }
 
 func permissionRank(value string) (int, bool) {
