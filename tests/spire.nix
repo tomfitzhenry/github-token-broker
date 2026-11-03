@@ -143,7 +143,6 @@ pkgs.testers.nixosTest {
         policies = [
           {
             spiffeID = clientID;
-            repositories = [ "example/repo" ];
             permissions = {
               contents = "read";
               pull_requests = "write";
@@ -193,6 +192,17 @@ pkgs.testers.nixosTest {
 
         request = json.loads(machine.succeed("cat /tmp/fake-github-request.json"))
         assert request["repositories"] == ["repo"], request
+        assert request["permissions"] == {"contents": "read"}, request
+
+    with subtest("a repository outside the old allowlist is now allowed"):
+        output = machine.wait_until_succeeds(
+            token_cmd.replace("--repository example/repo", "--repository example/other"),
+            timeout=180,
+        )
+        assert output.strip() == "ghs_test_token", output
+
+        request = json.loads(machine.succeed("cat /tmp/fake-github-request.json"))
+        assert request["repositories"] == ["other"], request
         assert request["permissions"] == {"contents": "read"}, request
 
     with subtest("policy-denied permissions fail"):

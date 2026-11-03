@@ -26,7 +26,7 @@ let
         ";installation_id=${toString policy.installationID}"
       );
     in
-    "spiffe_id=${policy.spiffeID};repositories=${concatStringsSep "," policy.repositories};permissions=${permissions}${installation}";
+    "spiffe_id=${policy.spiffeID};permissions=${permissions}${installation}";
 
   execArgs = [
     "-listen"
@@ -139,10 +139,6 @@ in
               default = null;
               description = "Optional per-policy installation ID.";
             };
-            repositories = mkOption {
-              type = types.listOf types.str;
-              description = "Repositories this identity may request tokens for.";
-            };
             permissions = mkOption {
               type = types.attrsOf (types.enum [ "read" "write" ]);
               description = "Maximum permissions this identity may request.";
@@ -151,7 +147,7 @@ in
         }
       );
       default = [ ];
-      description = "Per-SPIFFE-ID allowlist enforced by the broker.";
+      description = "Per-SPIFFE-ID permission grants enforced by the broker. The GitHub App installation restricts which repositories each policy can cover.";
     };
 
     extraArgs = mkOption {

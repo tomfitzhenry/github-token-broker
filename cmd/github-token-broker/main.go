@@ -14,7 +14,7 @@ import (
 	"github.com/tomfitzhenry/github-token-broker/internal/broker"
 )
 
-const policyHelp = "policy: spiffe_id=SPIFFE_ID;repositories=owner/repo[,owner/repo...];permissions=name=read|write[,name=read|write...][;installation_id=N] (repeatable)"
+const policyHelp = "policy: spiffe_id=SPIFFE_ID;permissions=name=read|write[,name=read|write...][;installation_id=N] (repeatable; the GitHub App installation restricts repositories)"
 
 func main() {
 	var (

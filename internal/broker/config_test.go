@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,8 +42,8 @@ func testKeyFile(t *testing.T) (string, *rsa.PrivateKey) {
 func TestParsePolicies(t *testing.T) {
 	td := testTrustDomain(t)
 	raw := []string{
-		"spiffe_id=spiffe://example.org/agent/opencode;repositories=owner/a,owner/b;permissions=contents=write,pull_requests=write",
-		"spiffe_id=spiffe://example.org/agent/reader;repositories=owner/a;permissions=contents=read;installation_id=99",
+		"spiffe_id=spiffe://example.org/agent/opencode;permissions=contents=write,pull_requests=write",
+		"spiffe_id=spiffe://example.org/agent/reader;permissions=contents=read;installation_id=99",
 	}
 	policies, err := ParsePolicies(raw, td, 42)
 	if err != nil {
@@ -51,7 +52,7 @@ func TestParsePolicies(t *testing.T) {
 	if len(policies) != 2 {
 		t.Fatalf("policies = %d", len(policies))
 	}
-	if len(policies[0].Repositories) != 2 || policies[0].InstallationID != 42 {
+	if policies[0].InstallationID != 42 || policies[0].Permissions["contents"] != "write" {
 		t.Fatalf("policy 0 = %+v", policies[0])
 	}
 	if policies[1].InstallationID != 99 || policies[1].Permissions["contents"] != "read" {
@@ -62,7 +63,7 @@ func TestParsePolicies(t *testing.T) {
 func TestParsePolicyRejectsBadPermission(t *testing.T) {
 	td := testTrustDomain(t)
 	_, err := ParsePolicy(
-		"spiffe_id=spiffe://example.org/agent/opencode;repositories=owner/a;permissions=contents=admin",
+		"spiffe_id=spiffe://example.org/agent/opencode;permissions=contents=admin",
 		td, 42,
 	)
 	if err == nil {
@@ -70,11 +71,25 @@ func TestParsePolicyRejectsBadPermission(t *testing.T) {
 	}
 }
 
+func TestParsePolicyRejectsRepositoriesField(t *testing.T) {
+	td := testTrustDomain(t)
+	_, err := ParsePolicy(
+		"spiffe_id=spiffe://example.org/agent/opencode;repositories=owner/a;permissions=contents=write",
+		td, 42,
+	)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "unknown policy field") {
+		t.Fatalf("error = %v, want unknown policy field", err)
+	}
+}
+
 func TestValidate(t *testing.T) {
 	keyPath, key := testKeyFile(t)
 	td := testTrustDomain(t)
 	policy, err := ParsePolicy(
-		"spiffe_id=spiffe://example.org/agent/opencode;repositories=owner/a;permissions=contents=write",
+		"spiffe_id=spiffe://example.org/agent/opencode;permissions=contents=write",
 		td, 42,
 	)
 	if err != nil {

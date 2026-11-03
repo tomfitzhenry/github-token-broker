@@ -31,13 +31,11 @@ func testBrokerConfig(t *testing.T) *Config {
 			{
 				SPIFFEID:       writer,
 				InstallationID: 456,
-				Repositories:   []string{"example/repo"},
 				Permissions:    map[string]string{"contents": "write", "pull_requests": "write"},
 			},
 			{
 				SPIFFEID:       reader,
 				InstallationID: 456,
-				Repositories:   []string{"example/repo"},
 				Permissions:    map[string]string{"contents": "read"},
 			},
 		},
@@ -73,6 +71,40 @@ func TestMintTokenRPC(t *testing.T) {
 	}
 	if gotBody["repositories"] == nil {
 		t.Fatalf("request body = %v", gotBody)
+	}
+}
+
+func TestMintTokenRPCAllowsAnyRepository(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		fmt.Fprint(w, `{"token":"ghs_test","expires_at":"2026-11-02T12:00:00Z"}`)
+	}))
+	defer server.Close()
+
+	cfg := testBrokerConfig(t)
+	b := New(cfg, nil)
+	b.github.BaseURL = server.URL
+	b.github.HTTP = server.Client()
+	id := testID(t, "spiffe://example.org/agent/writer")
+	ctx := context.WithValue(context.Background(), peerIDKey{}, id)
+
+	// The old policies used to list example/repo. The broker no longer rejects
+	// other repositories; the App installation enforces that boundary.
+	resp, err := (&tokenService{broker: b}).MintToken(ctx, &tokenbrokerv1.MintTokenRequest{
+		Repository: "example/other",
+	})
+	if err != nil {
+		t.Fatalf("MintToken: %v", err)
+	}
+	if resp.GetToken() != "ghs_test" {
+		t.Fatalf("token = %q", resp.GetToken())
+	}
+	repositories, ok := gotBody["repositories"].([]any)
+	if !ok || len(repositories) != 1 || repositories[0] != "other" {
+		t.Fatalf("request body repositories = %v, want [%q]", gotBody["repositories"], "other")
 	}
 }
 
