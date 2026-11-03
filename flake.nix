@@ -27,6 +27,7 @@
         {
           default = package;
           github-token-broker = package;
+          gh-via-spiffe = pkgs.callPackage ./gh-via-spiffe.nix { brokerPackage = package; };
         }
       );
 

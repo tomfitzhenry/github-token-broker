@@ -175,8 +175,12 @@ The repository is a flake:
 
 ```sh
 nix build .#github-token-broker
+nix build .#gh-via-spiffe
 nix flake check
 ```
+
+`gh-via-spiffe` is also a flake package; see [Running `gh` as the
+App](#running-gh-as-the-app).
 
 The NixOS module is exposed as `nixosModules.default`:
 
@@ -302,6 +306,47 @@ bin/agent-token token ... --env-file /run/agent/github.env
 ```
 
 The file is mode 0600 and remains valid until the installation token expires.
+
+### Running `gh` as the App
+
+`gh-via-spiffe` is a `gh` wrapper for interactive use: for the repository named
+by the checkout's `origin` remote it mints an installation token from the broker
+and runs the real `gh` with `GH_TOKEN` set. Outside a GitHub checkout, or when
+no token can be minted (no SPIRE agent, broker unreachable, repository not
+authorized by a policy), it falls back to `gh`'s normal authentication, so it is
+safe to alias everywhere.
+
+```sh
+nix run github:tomfitzhenry/github-token-broker#gh-via-spiffe -- pr list
+```
+
+Or install it and alias or shadow `gh`:
+
+```sh
+nix profile install github:tomfitzhenry/github-token-broker#gh-via-spiffe
+export GH_VIA_SPIFFE_BROKER=github-token-broker.example.org:8443
+export GH_VIA_SPIFFE_SERVER_ID=spiffe://example.org/github-token-broker
+alias gh=gh-via-spiffe
+```
+
+Aliases only apply to interactive shells. Tools that invoke `gh` as a
+subprocess (scripts, editors) see the wrapper only if a symlink named `gh`
+pointing at it is earlier in `PATH`:
+
+```sh
+mkdir -p ~/.local/bin
+ln -sf "$(command -v gh-via-spiffe)" ~/.local/bin/gh
+```
+
+Configuration is entirely environment-driven:
+
+| Variable | Meaning |
+| --- | --- |
+| `GH_VIA_SPIFFE_BROKER` | broker gRPC address, e.g. `host:8443` (required) |
+| `GH_VIA_SPIFFE_SERVER_ID` | SPIFFE ID the broker presents (required) |
+| `GH_VIA_SPIFFE_REPOSITORY` | `owner/repo` override; default derives it from `origin` |
+| `GH_VIA_SPIFFE_PERMISSIONS` | comma-separated `KEY=VALUE` list to request; default is the policy's permissions |
+| `SPIFFE_ENDPOINT_SOCKET` | Workload API socket, if not the default |
 
 ## Security notes
 
