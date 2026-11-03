@@ -23,6 +23,11 @@
 #                              (default: whatever the broker policy grants)
 #   SPIFFE_ENDPOINT_SOCKET     SPIRE Workload API socket, if not the default
 
+# nixpkgs' SPIRE module (and this repository's NixOS module) use this path;
+# SPIRE's own default is /tmp/spire-agent/public/api.sock.
+: "${SPIFFE_ENDPOINT_SOCKET:=unix:///run/spire/agent/public/api.sock}"
+export SPIFFE_ENDPOINT_SOCKET
+
 if [ -z "${GH_VIA_SPIFFE_BROKER:-}" ] || [ -z "${GH_VIA_SPIFFE_SERVER_ID:-}" ]; then
   echo "gh-via-spiffe: set GH_VIA_SPIFFE_BROKER and GH_VIA_SPIFFE_SERVER_ID" >&2
   exit 2
