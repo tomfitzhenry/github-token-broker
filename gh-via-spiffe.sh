@@ -36,6 +36,9 @@ if [ -z "${repository}" ]; then
 fi
 
 if [ -n "${repository}" ]; then
+  # gh cannot infer the repository from non-standard remotes (e.g. the
+  # git-remote-gittuf "gittuf::" transport), so tell it explicitly.
+  export GH_REPO="${repository}"
   token_args=(
     --broker "${GH_VIA_SPIFFE_BROKER}"
     --server-id "${GH_VIA_SPIFFE_SERVER_ID}"
