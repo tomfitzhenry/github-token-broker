@@ -338,6 +338,10 @@ mkdir -p ~/.local/bin
 ln -sf "$(command -v gh-via-spiffe)" ~/.local/bin/gh
 ```
 
+When a repository is detected it is also exported as `GH_REPO`, so `gh` works
+inside checkouts whose `origin` is not a plain GitHub URL (for example
+`gittuf::git@github.com:owner/repo` from the gittuf transport).
+
 Configuration is entirely environment-driven:
 
 | Variable | Meaning |
