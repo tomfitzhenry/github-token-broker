@@ -25,6 +25,9 @@ agent (X509-SVID) ── mTLS ──> broker ── GitHub App JWT ──> insta
 - Policies bind a SPIFFE ID to a permission set. The GitHub App installation is
   the repository allowlist; the broker keeps no per-policy repository list.
 - Tokens are cached in broker memory until shortly before their one-hour expiry.
+- `agent-token` also caches tokens locally, per unix user and token scope, for a
+  short TTL (default five minutes) to avoid a Workload API and gRPC round trip on
+  every `gh`/`git` call; see [Local token cache](#local-token-cache).
 
 ## Status and known limitations
 
@@ -306,6 +309,40 @@ bin/agent-token exec \
 and clears GitHub credential helpers so the token comes from the broker rather
 than the local user’s credentials.
 
+### Local token cache
+
+`agent-token token` and `agent-token exec` cache the minted token locally by
+default, because an agent runs many short-lived `gh` and `git` commands and each
+mint costs a SPIFFE Workload API call plus a broker gRPC round trip. A fresh
+cache skips both; this makes `gh-via-spiffe` fast too, without any wrapper
+changes.
+
+The cache is scoped per unix user and per token scope (broker address, broker
+SPIFFE ID, repository, and requested permission set), so a token minted for one
+repository or permission set is never served for another. Each user gets a
+separate cache directory:
+
+1. `$XDG_RUNTIME_DIR/github-token-broker` (a per-user tmpfs; preferred),
+2. otherwise `$XDG_CACHE_HOME/github-token-broker`,
+3. otherwise `~/.cache/github-token-broker`.
+
+The directory is mode 0700 and each entry is a mode-0600 file, so other unix
+users cannot read it. Within one uid, processes share the cache — they already
+share the uid's SPIFFE identity, so the broker cannot distinguish them either.
+The default TTL is 5 minutes, capped to stop serving a token shortly before its
+GitHub expiry. Refreshes run under an exclusive `flock` so concurrent callers
+mint once. The previous entry is removed before minting, so a broker or SPIRE
+outage fails closed instead of serving an expired token.
+
+| Flag | Meaning |
+|---|---|
+| `-cache-ttl` | how long a minted token may be reused, default `5m`; `0` disables the cache |
+| `-cache-dir` | cache directory override, mainly for tests and unusual service sandboxes |
+
+If the cache directory cannot be created, locked, or written, `agent-token`
+still mints a token and continues (a warning goes to stderr); only a failed
+refresh of an already-expired token is fatal.
+
 For a service that cannot use `exec`, write an EnvironmentFile:
 
 ```sh
@@ -374,5 +411,7 @@ Configuration is entirely environment-driven:
 - Use branch protection on the default branch. The App’s Contents write lets it
   push branches; the broker scopes tokens but cannot prevent a correctly scoped
   write token from updating `master` unless branch protection blocks it.
-- The broker caches tokens in memory. There is no refresh token and no token on
-  disk.
+- The broker caches tokens in memory; `agent-token` additionally caches them
+  locally per user (mode 0600, mode 0700 directory, short TTL). There is no
+  refresh token, and a cache entry is never served beyond its TTL or the GitHub
+  token expiry.
