@@ -29,6 +29,14 @@ Flags common to both commands:
   --server-id ID        broker SPIFFE ID, e.g. spiffe://example.org/github-broker
   --repository REPO     owner/repo to scope the token to
   --permission KEY=VAL  requested permission, repeatable (default: policy defaults)
+  --cache-ttl DURATION  cache minted tokens locally for this long (default 5m; 0 disables)
+  --cache-dir DIR       cache directory (default: per-user runtime or cache directory)
+
+The cache is per unix user and per token scope (broker, repository and
+permission set), with a mode-0600 file in a mode-0700 directory. A fresh cache
+skips the SPIFFE Workload API and broker call, which matters for the many
+short-lived gh/git invocations an agent makes. The previous token is removed
+before a refresh, so a broker outage fails closed instead of serving an expiry.
 
 token also accepts:
   --env-file FILE       write GH_TOKEN/GITHUB_TOKEN to a 0600 file instead of stdout
@@ -63,6 +71,8 @@ type options struct {
 	repository  string
 	permissions permissionFlag
 	envFile     string
+	cacheTTL    time.Duration
+	cacheDir    string
 }
 
 func addFlags(fs *flag.FlagSet, opts *options) {
@@ -70,6 +80,18 @@ func addFlags(fs *flag.FlagSet, opts *options) {
 	fs.StringVar(&opts.serverID, "server-id", "", "broker SPIFFE ID")
 	fs.StringVar(&opts.repository, "repository", "", "owner/repo to scope the token to")
 	fs.Var(&opts.permissions, "permission", "requested permission KEY=VALUE (repeatable)")
+	fs.DurationVar(
+		&opts.cacheTTL,
+		"cache-ttl",
+		defaultCacheTTL,
+		"cache minted tokens locally for this long; 0 disables the cache",
+	)
+	fs.StringVar(
+		&opts.cacheDir,
+		"cache-dir",
+		"",
+		"token cache directory (default: $XDG_RUNTIME_DIR, then $XDG_CACHE_HOME, then ~/.cache)",
+	)
 }
 
 func (o *options) validate() error {
@@ -85,13 +107,15 @@ func (o *options) validate() error {
 	return nil
 }
 
-func (o *options) token(ctx context.Context) (agent.Token, error) {
-	client, err := agent.New(ctx, o.broker, o.serverID)
-	if err != nil {
-		return agent.Token{}, err
-	}
-	defer client.Close()
-	return client.Token(ctx, o.repository, o.permissions.values)
+func (o *options) token(ctx context.Context, warn io.Writer) (agent.Token, error) {
+	return tokenWithCache(ctx, o, func(ctx context.Context) (agent.Token, error) {
+		client, err := agent.New(ctx, o.broker, o.serverID)
+		if err != nil {
+			return agent.Token{}, err
+		}
+		defer client.Close()
+		return client.Token(ctx, o.repository, o.permissions.values)
+	}, warn)
 }
 
 func runToken(args []string, stdout, stderr io.Writer) int {
@@ -113,7 +137,7 @@ func runToken(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	token, err := opts.token(ctx)
+	token, err := opts.token(ctx, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -149,7 +173,7 @@ func runExec(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	token, err := opts.token(ctx)
+	token, err := opts.token(ctx, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
