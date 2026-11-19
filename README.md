@@ -316,12 +316,20 @@ The file is mode 0600 and remains valid until the installation token expires.
 
 ### Running `gh` as the App
 
-`gh-via-spiffe` is a `gh` wrapper for interactive use: for the repository named
-by the checkout's `origin` remote it mints an installation token from the broker
-and runs the real `gh` with `GH_TOKEN` set. Outside a GitHub checkout, or when
-no token can be minted (no SPIRE agent, broker unreachable, repository not
-authorized by a policy), it falls back to `gh`'s normal authentication, so it is
-safe to alias everywhere.
+`gh-via-spiffe` is a `gh` wrapper for interactive use: for the target GitHub
+repository it mints an installation token from the broker and runs the real
+`gh` with `GH_TOKEN` set. The repository is resolved in precedence order from:
+
+1. `GH_VIA_SPIFFE_REPOSITORY`
+2. `--repo` / `-R` flags on the command line
+3. `GH_REPO`
+4. positional `gh repo <subcommand> owner/repo` arguments (`clone`, `view`, `fork`, etc.)
+5. `path=` on stdin for `gh auth git-credential get` (when git has `credential.https://github.com.useHttpPath = true`, allowing `git clone` outside a checkout)
+6. the checkout's `origin` remote
+
+When no repository can be determined or no token can be minted (no SPIRE agent,
+broker unreachable, repository not authorized by a policy), it falls back to
+`gh`'s normal authentication, so it is safe to alias everywhere.
 
 ```sh
 nix run github:tomfitzhenry/github-token-broker#gh-via-spiffe -- pr list
