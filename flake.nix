@@ -40,6 +40,7 @@
         { pkgs, system }:
         {
           github-token-broker = self.packages.${system}.github-token-broker;
+          gh-via-spiffe = import ./tests/gh-via-spiffe.nix { inherit pkgs; };
           spire = import ./tests/spire.nix {
             inherit pkgs lib;
             brokerPackage = self.packages.${system}.github-token-broker;

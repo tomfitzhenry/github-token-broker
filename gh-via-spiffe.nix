@@ -1,16 +1,16 @@
 {
   pkgs,
   brokerPackage ? pkgs.callPackage ./package.nix { },
+  gh ? pkgs.gh,
 }:
-# Wrapper that runs gh with a broker-minted installation token for the current
-# checkout; see gh-via-spiffe.sh. `brokerPackage` supplies bin/agent-token.
+# Wrapper that runs gh with a broker-minted installation token for the target
+# repository; see gh-via-spiffe.sh. `brokerPackage` supplies bin/agent-token.
 pkgs.writeShellApplication {
   name = "gh-via-spiffe";
   runtimeInputs = [
     brokerPackage
-    pkgs.gh
+    gh
     pkgs.git
-    pkgs.gnused
     pkgs.coreutils
   ];
   text = builtins.readFile ./gh-via-spiffe.sh;
