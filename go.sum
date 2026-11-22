@@ -18,6 +18,10 @@ github.com/spiffe/go-spiffe/v2 v2.9.0 h1:g5qTg3qIP1HXV+GzuyEfSJFVxUCpEP5Ui1OINVJ
 github.com/spiffe/go-spiffe/v2 v2.9.0/go.mod h1:w2CLWKLMTX/PPYUEUPv3ltH0RXsw5S8suwNF46w9/Aw=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
+github.com/tomfitzhenry/go-grpc-peersec v0.1.0 h1:rGTCe6b/wnGPR+sl7sUJsV9gvq3bcvUDBsuzGThE9yc=
+github.com/tomfitzhenry/go-grpc-peersec v0.1.0/go.mod h1:Tus3rynShtw6ZA28f599SjWfjTwodxTfW3NaECRDK4g=
+github.com/tomfitzhenry/go-peersec v0.1.0 h1:jEtplUETWaZ8yNcpmay03s1oyksjWTVh1//Bhjk3/4Y=
+github.com/tomfitzhenry/go-peersec v0.1.0/go.mod h1:S/qFNdZ5nckaINn2KczaDtwbuusrw/zwAlc/YW+pWPs=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/otel v1.39.0 h1:8yPrr/S0ND9QEfTfdP9V+SiwT4E0G7Y5MO7p85nis48=

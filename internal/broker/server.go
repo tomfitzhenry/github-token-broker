@@ -6,19 +6,22 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/spiffe/go-spiffe/v2/spiffegrpc/grpccredentials"
-	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
+	"github.com/tomfitzhenry/go-grpc-peersec"
+	"github.com/tomfitzhenry/go-peersec"
 	tokenbrokerv1 "github.com/tomfitzhenry/github-token-broker/gen/tokenbroker/v1"
 	"github.com/tomfitzhenry/github-token-broker/internal/githubapi"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
@@ -30,7 +33,7 @@ type cacheEntry struct {
 	expiresAt time.Time
 }
 
-type peerIDKey struct{}
+type principalKey struct{}
 
 // Broker serves scoped GitHub App installation tokens over SPIFFE mTLS.
 type Broker struct {
@@ -59,33 +62,92 @@ func New(cfg *Config, logger *slog.Logger) *Broker {
 	}
 }
 
-// Run serves until ctx is cancelled or the server fails.
+type grpcListener struct {
+	mode     string
+	addr     string
+	listener net.Listener
+	server   *grpc.Server
+	health   *health.Server
+}
+
+// Run serves until ctx is cancelled or a server fails.
 func (b *Broker) Run(ctx context.Context) error {
-	source, err := workloadapi.NewX509Source(ctx)
-	if err != nil {
-		return fmt.Errorf("SPIFFE Workload API: %w", err)
-	}
-	defer source.Close()
+	var listeners []grpcListener
+	var source *workloadapi.X509Source
 
-	svid, err := source.GetX509SVID()
-	if err != nil {
-		return fmt.Errorf("get broker SVID: %w", err)
-	}
-	b.log.Info("broker identity", "spiffe_id", svid.ID.String())
+	if b.cfg.ListenAddr != "" {
+		var err error
+		source, err = workloadapi.NewX509Source(ctx)
+		if err != nil {
+			return fmt.Errorf("SPIFFE Workload API: %w", err)
+		}
+		defer source.Close()
 
-	creds := grpccredentials.MTLSServerCredentials(
-		source,
-		source,
-		tlsconfig.AuthorizeMemberOf(b.cfg.TrustDomain),
-	)
-	listener, err := net.Listen("tcp", b.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+		svid, err := source.GetX509SVID()
+		if err != nil {
+			return fmt.Errorf("get broker SVID: %w", err)
+		}
+		b.log.Info("broker identity", "spiffe_id", svid.ID.String())
+
+		creds := grpccredentials.MTLSServerCredentials(
+			source,
+			source,
+			tlsconfig.AuthorizeMemberOf(b.cfg.TrustDomain),
+		)
+		ln, err := net.Listen("tcp", b.cfg.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("listen %s: %w", b.cfg.ListenAddr, err)
+		}
+		listeners = append(listeners, b.newGRPCListener("spiffe", b.cfg.ListenAddr, ln, creds, b.spiffeAuthInterceptor))
 	}
 
+	if b.cfg.PeerSecListenAddr != "" {
+		ln, err := listenPeerSec(b.cfg.PeerSecListenAddr)
+		if err != nil {
+			for _, l := range listeners {
+				_ = l.listener.Close()
+			}
+			return fmt.Errorf("peersec listen %s: %w", b.cfg.PeerSecListenAddr, err)
+		}
+		creds := grpcpeersec.ServerCredentials(
+			grpcpeersec.WithSecurityLevel(credentials.PrivacyAndIntegrity),
+			grpcpeersec.WithAuthorize(authorizePeerSec),
+		)
+		listeners = append(listeners, b.newGRPCListener("peersec", b.cfg.PeerSecListenAddr, ln, creds, b.peersecAuthInterceptor))
+	}
+
+	errCh := make(chan error, len(listeners))
+	for _, l := range listeners {
+		l := l
+		go func() {
+			b.log.Info("listening", "mode", l.mode, "addr", l.addr)
+			errCh <- l.server.Serve(l.listener)
+		}()
+	}
+
+	select {
+	case err := <-errCh:
+		stopServers(listeners)
+		if errors.Is(err, grpc.ErrServerStopped) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		stopServers(listeners)
+		return nil
+	}
+}
+
+func (b *Broker) newGRPCListener(
+	mode string,
+	addr string,
+	ln net.Listener,
+	creds credentials.TransportCredentials,
+	interceptor grpc.UnaryServerInterceptor,
+) grpcListener {
 	server := grpc.NewServer(
 		grpc.Creds(creds),
-		grpc.UnaryInterceptor(b.authInterceptor),
+		grpc.UnaryInterceptor(interceptor),
 		grpc.MaxRecvMsgSize(64<<10),
 	)
 	tokenbrokerv1.RegisterTokenBrokerServer(server, &tokenService{broker: b})
@@ -94,35 +156,61 @@ func (b *Broker) Run(ctx context.Context) error {
 	healthpb.RegisterHealthServer(server, healthServer)
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 
-	errCh := make(chan error, 1)
-	go func() {
-		b.log.Info("listening", "addr", b.cfg.ListenAddr)
-		errCh <- server.Serve(listener)
-	}()
-
-	select {
-	case err := <-errCh:
-		if errors.Is(err, grpc.ErrServerStopped) {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		healthServer.Shutdown()
-		stopped := make(chan struct{})
-		go func() {
-			server.GracefulStop()
-			close(stopped)
-		}()
-		select {
-		case <-stopped:
-		case <-time.After(10 * time.Second):
-			server.Stop()
-		}
-		return nil
+	return grpcListener{
+		mode:     mode,
+		addr:     addr,
+		listener: ln,
+		server:   server,
+		health:   healthServer,
 	}
 }
 
-func (b *Broker) authInterceptor(
+func stopServers(listeners []grpcListener) {
+	for _, l := range listeners {
+		l.health.Shutdown()
+	}
+	stopped := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		for _, l := range listeners {
+			wg.Add(1)
+			go func(s *grpc.Server) {
+				defer wg.Done()
+				s.GracefulStop()
+			}(l.server)
+		}
+		wg.Wait()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		for _, l := range listeners {
+			l.server.Stop()
+		}
+	}
+}
+
+func listenPeerSec(addr string) (net.Listener, error) {
+	if path, ok := strings.CutPrefix(addr, "unix://"); ok {
+		_ = os.Remove(path)
+		return net.Listen("unix", path)
+	}
+	return net.Listen("tcp", addr)
+}
+
+func authorizePeerSec(info grpcpeersec.AuthInfo) error {
+	sc, err := peersec.ParseSELinuxContext(info.Raw)
+	if err != nil {
+		return err
+	}
+	if sc.IsUnlabeled() {
+		return fmt.Errorf("unlabeled peer %q is not allowed", info.Raw)
+	}
+	return nil
+}
+
+func (b *Broker) spiffeAuthInterceptor(
 	ctx context.Context,
 	req any,
 	_ *grpc.UnaryServerInfo,
@@ -132,7 +220,24 @@ func (b *Broker) authInterceptor(
 	if !ok {
 		return nil, status.Error(codes.Unauthenticated, "client SVID required")
 	}
-	return handler(context.WithValue(ctx, peerIDKey{}, id), req)
+	return handler(context.WithValue(ctx, principalKey{}, Principal{SPIFFEID: id}), req)
+}
+
+func (b *Broker) peersecAuthInterceptor(
+	ctx context.Context,
+	req any,
+	_ *grpc.UnaryServerInfo,
+	handler grpc.UnaryHandler,
+) (any, error) {
+	info, ok := grpcpeersec.PeerFromContext(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "client SO_PEERSEC required")
+	}
+	sc, err := peersec.ParseSELinuxContext(info.Raw)
+	if err != nil || sc.IsUnlabeled() {
+		return nil, status.Error(codes.Unauthenticated, "valid labeled SO_PEERSEC required")
+	}
+	return handler(context.WithValue(ctx, principalKey{}, Principal{SELinuxType: sc.Type}), req)
 }
 
 type tokenService struct {
@@ -141,32 +246,32 @@ type tokenService struct {
 }
 
 func (s *tokenService) MintToken(ctx context.Context, req *tokenbrokerv1.MintTokenRequest) (*tokenbrokerv1.MintTokenResponse, error) {
-	id, ok := ctx.Value(peerIDKey{}).(spiffeid.ID)
+	principal, ok := ctx.Value(principalKey{}).(Principal)
 	if !ok {
-		return nil, status.Error(codes.Unauthenticated, "client SVID required")
+		return nil, status.Error(codes.Unauthenticated, "client identity required")
 	}
 
-	policy, permissions, err := s.broker.cfg.Authorize(id, TokenRequest{
+	policy, permissions, err := s.broker.cfg.Authorize(principal, TokenRequest{
 		Repository:  req.GetRepository(),
 		Permissions: req.GetPermissions(),
 	})
 	if errors.Is(err, ErrForbidden) {
-		s.broker.log.Warn("denied token request", "spiffe_id", id.String(), "repository", req.GetRepository())
+		s.broker.log.Warn("denied token request", "principal", principal.String(), "repository", req.GetRepository())
 		return nil, status.Error(codes.PermissionDenied, "requested scope is not permitted")
 	}
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	token, err := s.broker.mint(ctx, id, policy, req.GetRepository(), permissions)
+	token, err := s.broker.mint(ctx, principal, policy, req.GetRepository(), permissions)
 	if err != nil {
-		s.broker.log.Error("mint token", "spiffe_id", id.String(), "repository", req.GetRepository(), "error", err)
+		s.broker.log.Error("mint token", "principal", principal.String(), "repository", req.GetRepository(), "error", err)
 		return nil, status.Error(codes.Unavailable, "could not mint GitHub token")
 	}
 
 	s.broker.log.Info(
 		"issued token",
-		"spiffe_id", id.String(),
+		"principal", principal.String(),
 		"repository", req.GetRepository(),
 		"permissions", permissionKey(permissions),
 		"expires_at", token.ExpiresAt,
@@ -179,13 +284,13 @@ func (s *tokenService) MintToken(ctx context.Context, req *tokenbrokerv1.MintTok
 
 func (b *Broker) mint(
 	ctx context.Context,
-	id spiffeid.ID,
+	principal Principal,
 	policy Policy,
 	repository string,
 	permissions map[string]string,
 ) (githubapi.Token, error) {
 	key := strings.Join([]string{
-		id.String(),
+		principal.String(),
 		strconv.FormatInt(policy.InstallationID, 10),
 		strings.ToLower(repository),
 		permissionKey(permissions),

@@ -17,17 +17,23 @@ func testID(t *testing.T, raw string) spiffeid.ID {
 }
 
 func TestAuthorize(t *testing.T) {
-	writer := testID(t, "spiffe://example.org/agent/writer")
-	reader := testID(t, "spiffe://example.org/agent/reader")
+	writer := Principal{SPIFFEID: testID(t, "spiffe://example.org/agent/writer")}
+	reader := Principal{SPIFFEID: testID(t, "spiffe://example.org/agent/reader")}
+	peersecReader := Principal{SELinuxType: "svc_reader_t"}
 	cfg := &Config{Policies: []Policy{
 		{
-			SPIFFEID:       writer,
+			SPIFFEID:       writer.SPIFFEID,
 			InstallationID: 7,
 			Permissions:    map[string]string{"contents": "write", "pull_requests": "write"},
 		},
 		{
-			SPIFFEID:       reader,
+			SPIFFEID:       reader.SPIFFEID,
 			InstallationID: 7,
+			Permissions:    map[string]string{"contents": "read"},
+		},
+		{
+			SELinuxType:    "svc_reader_t",
+			InstallationID: 9,
 			Permissions:    map[string]string{"contents": "read"},
 		},
 	}}
@@ -53,6 +59,26 @@ func TestAuthorize(t *testing.T) {
 		Permissions: map[string]string{"contents": "write"},
 	}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("reader write error = %v, want forbidden", err)
+	}
+
+	policy, perms, err = cfg.Authorize(peersecReader, TokenRequest{Repository: "example/repo"})
+	if err != nil {
+		t.Fatalf("peersecReader: %v", err)
+	}
+	if policy.InstallationID != 9 || perms["contents"] != "read" {
+		t.Fatalf("peersecReader policy = %+v perms = %v", policy, perms)
+	}
+
+	if _, _, err := cfg.Authorize(Principal{SELinuxType: "svc_other_t"}, TokenRequest{
+		Repository: "example/repo",
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unknown selinux type error = %v, want forbidden", err)
+	}
+
+	if _, _, err := cfg.Authorize(Principal{}, TokenRequest{
+		Repository: "example/repo",
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("empty principal error = %v, want forbidden", err)
 	}
 
 	// The broker does not restrict which repositories a policy covers; the

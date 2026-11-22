@@ -14,18 +14,19 @@ import (
 	"github.com/tomfitzhenry/github-token-broker/internal/broker"
 )
 
-const policyHelp = "policy: spiffe_id=SPIFFE_ID;permissions=name=read|write[,name=read|write...][;installation_id=N] (repeatable; the GitHub App installation restricts repositories)"
+const policyHelp = "policy: (spiffe_id=SPIFFE_ID|selinux_type=TYPE);permissions=name=read|write[,name=read|write...][;installation_id=N] (repeatable; the GitHub App installation restricts repositories)"
 
 func main() {
 	var (
-		listenAddr     = flag.String("listen", ":8443", "listen address")
-		trustDomainRaw = flag.String("trust-domain", "", "SPIFFE trust domain")
-		cacheSkew      = flag.Duration("cache-skew", 5*time.Minute, "stop serving cached tokens this long before expiry")
-		appID          = flag.Int64("app-id", 0, "GitHub App ID")
-		installationID = flag.Int64("installation-id", 0, "default GitHub App installation ID")
-		privateKey     = flag.String("private-key", "", "path to the GitHub App RSA private key")
-		apiURL         = flag.String("api-url", "https://api.github.com", "GitHub REST API base URL")
-		policyFlags    []string
+		listenAddr        = flag.String("listen", ":8443", "SPIFFE-mTLS listen address (empty to disable)")
+		peersecListenAddr = flag.String("peersec-listen", "", "SO_PEERSEC listen address (host:port or unix:///path)")
+		trustDomainRaw    = flag.String("trust-domain", "", "SPIFFE trust domain")
+		cacheSkew         = flag.Duration("cache-skew", 5*time.Minute, "stop serving cached tokens this long before expiry")
+		appID             = flag.Int64("app-id", 0, "GitHub App ID")
+		installationID    = flag.Int64("installation-id", 0, "default GitHub App installation ID")
+		privateKey        = flag.String("private-key", "", "path to the GitHub App RSA private key")
+		apiURL            = flag.String("api-url", "https://api.github.com", "GitHub REST API base URL")
+		policyFlags       []string
 	)
 	flag.Func("policy", policyHelp, func(value string) error {
 		policyFlags = append(policyFlags, value)
@@ -34,13 +35,16 @@ func main() {
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if *trustDomainRaw == "" {
-		logger.Error("-trust-domain is required")
-		os.Exit(2)
-	}
-	trustDomain, err := spiffeid.TrustDomainFromString(*trustDomainRaw)
-	if err != nil {
-		logger.Error("invalid -trust-domain", "error", err)
+	var trustDomain spiffeid.TrustDomain
+	if *trustDomainRaw != "" {
+		var err error
+		trustDomain, err = spiffeid.TrustDomainFromString(*trustDomainRaw)
+		if err != nil {
+			logger.Error("invalid -trust-domain", "error", err)
+			os.Exit(2)
+		}
+	} else if *listenAddr != "" {
+		logger.Error("-trust-domain is required when -listen is set")
 		os.Exit(2)
 	}
 	key, err := broker.LoadPrivateKey(*privateKey)
@@ -54,9 +58,10 @@ func main() {
 		os.Exit(2)
 	}
 	cfg := &broker.Config{
-		ListenAddr:  *listenAddr,
-		TrustDomain: trustDomain,
-		CacheSkew:   *cacheSkew,
+		ListenAddr:        *listenAddr,
+		PeerSecListenAddr: *peersecListenAddr,
+		TrustDomain:       trustDomain,
+		CacheSkew:         *cacheSkew,
 		GitHub: broker.GitHubConfig{
 			AppID:          *appID,
 			InstallationID: *installationID,

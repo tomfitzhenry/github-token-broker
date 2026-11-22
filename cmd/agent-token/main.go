@@ -14,24 +14,27 @@ import (
 	"github.com/tomfitzhenry/github-token-broker/internal/agent"
 )
 
-const usage = `agent-token - obtain a scoped GitHub token from the SPIFFE broker
+const usage = `agent-token - obtain a scoped GitHub token from the token broker
 
 Usage:
-  agent-token token --broker ADDR --server-id SPIFFE_ID --repository OWNER/REPO [flags]
-  agent-token exec  --broker ADDR --server-id SPIFFE_ID --repository OWNER/REPO [flags] -- COMMAND...
+  agent-token token --broker ADDR --repository OWNER/REPO [flags]
+  agent-token exec  --broker ADDR --repository OWNER/REPO [flags] -- COMMAND...
   agent-token -h
 
-The client obtains an X509-SVID from the local SPIRE agent, uses it for mTLS,
-and asks the broker over gRPC for a short-lived GitHub App installation token.
+In spiffe mode (default), the client obtains an X509-SVID from the local SPIRE
+agent and uses it for mTLS. In peersec mode, the client relies on kernel
+SO_PEERSEC (for example, over Labeled IPsec ESP-NULL or a Unix socket).
 
 Flags common to both commands:
-  --broker ADDR         broker gRPC address, e.g. github-broker:8443
-  --server-id ID        broker SPIFFE ID, e.g. spiffe://example.org/github-broker
-  --repository REPO     owner/repo to scope the token to
-  --permission KEY=VAL  requested permission, repeatable (default: policy defaults)
+  --broker ADDR               broker gRPC address, e.g. github-broker:8443
+  --auth MODE                 authentication mode: spiffe or peersec (default: spiffe)
+  --server-id ID              broker SPIFFE ID (required when --auth=spiffe)
+  --server-selinux-type TYPE  expected broker SELinux type (optional when --auth=peersec)
+  --repository REPO           owner/repo to scope the token to
+  --permission KEY=VAL        requested permission, repeatable (default: policy defaults)
 
 token also accepts:
-  --env-file FILE       write GH_TOKEN/GITHUB_TOKEN to a 0600 file instead of stdout
+  --env-file FILE             write GH_TOKEN/GITHUB_TOKEN to a 0600 file instead of stdout
 `
 
 func main() {
@@ -58,16 +61,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 type options struct {
-	broker      string
-	serverID    string
-	repository  string
-	permissions permissionFlag
-	envFile     string
+	broker            string
+	auth              string
+	serverID          string
+	serverSELinuxType string
+	repository        string
+	permissions       permissionFlag
+	envFile           string
 }
 
 func addFlags(fs *flag.FlagSet, opts *options) {
-	fs.StringVar(&opts.broker, "broker", "", "broker gRPC address (host:port)")
-	fs.StringVar(&opts.serverID, "server-id", "", "broker SPIFFE ID")
+	fs.StringVar(&opts.broker, "broker", "", "broker gRPC address (host:port or unix:///path)")
+	fs.StringVar(&opts.auth, "auth", "spiffe", "authentication mode: spiffe or peersec")
+	fs.StringVar(&opts.serverID, "server-id", "", "broker SPIFFE ID (for --auth=spiffe)")
+	fs.StringVar(&opts.serverSELinuxType, "server-selinux-type", "", "expected broker SELinux type (for --auth=peersec)")
 	fs.StringVar(&opts.repository, "repository", "", "owner/repo to scope the token to")
 	fs.Var(&opts.permissions, "permission", "requested permission KEY=VALUE (repeatable)")
 }
@@ -76,17 +83,38 @@ func (o *options) validate() error {
 	if o.broker == "" {
 		return fmt.Errorf("--broker is required")
 	}
-	if o.serverID == "" {
-		return fmt.Errorf("--server-id is required")
-	}
 	if o.repository == "" {
 		return fmt.Errorf("--repository is required")
+	}
+	switch o.auth {
+	case "spiffe":
+		if o.serverID == "" {
+			return fmt.Errorf("--server-id is required when --auth=spiffe")
+		}
+		if o.serverSELinuxType != "" {
+			return fmt.Errorf("--server-selinux-type is only valid with --auth=peersec")
+		}
+	case "peersec":
+		if o.serverID != "" {
+			return fmt.Errorf("--server-id is only valid with --auth=spiffe")
+		}
+	default:
+		return fmt.Errorf("unknown --auth mode %q (want spiffe or peersec)", o.auth)
 	}
 	return nil
 }
 
 func (o *options) token(ctx context.Context) (agent.Token, error) {
-	client, err := agent.New(ctx, o.broker, o.serverID)
+	var (
+		client *agent.Client
+		err    error
+	)
+	switch o.auth {
+	case "peersec":
+		client, err = agent.NewPeerSec(o.broker, o.serverSELinuxType)
+	default:
+		client, err = agent.New(ctx, o.broker, o.serverID)
+	}
 	if err != nil {
 		return agent.Token{}, err
 	}

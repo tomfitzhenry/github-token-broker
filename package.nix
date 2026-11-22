@@ -4,7 +4,7 @@ buildGoModule {
   pname = "github-token-broker";
   version = "0.1.0";
   src = ./.;
-  vendorHash = "sha256-hFIv5LbK05/Ty7w6Nio4rokqaX4wo/WYb1PuYZhYv/U=";
+  vendorHash = "sha256-1O7jeGru3yQcUtU3QpfOjuuQ+ImTp36HNFBDEb8n9oc=";
 
   subPackages = [
     "cmd/github-token-broker"

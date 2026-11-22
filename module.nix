@@ -16,9 +16,17 @@ let
     optionalString
     ;
 
+  spiffeEnabled = cfg.listenAddress != null && cfg.listenAddress != "";
+  peersecEnabled = cfg.peersecListenAddress != null && cfg.peersecListenAddress != "";
+
   policyArg =
     policy:
     let
+      identity =
+        if policy.spiffeID != null then
+          "spiffe_id=${policy.spiffeID}"
+        else
+          "selinux_type=${policy.selinuxType}";
       permissions = concatStringsSep "," (
         map (name: "${name}=${policy.permissions.${name}}") (lib.attrNames policy.permissions)
       );
@@ -26,13 +34,11 @@ let
         ";installation_id=${toString policy.installationID}"
       );
     in
-    "spiffe_id=${policy.spiffeID};permissions=${permissions}${installation}";
+    "${identity};permissions=${permissions}${installation}";
 
   execArgs = [
     "-listen"
-    (escapeShellArg cfg.listenAddress)
-    "-trust-domain"
-    (escapeShellArg cfg.trustDomain)
+    (escapeShellArg (if cfg.listenAddress == null then "" else cfg.listenAddress))
     "-app-id"
     (toString cfg.appID)
     "-installation-id"
@@ -43,6 +49,14 @@ let
     (escapeShellArg cfg.apiURL)
     "-cache-skew"
     (escapeShellArg cfg.cacheSkew)
+  ]
+  ++ lib.optionals peersecEnabled [
+    "-peersec-listen"
+    (escapeShellArg cfg.peersecListenAddress)
+  ]
+  ++ lib.optionals (cfg.trustDomain != null && cfg.trustDomain != "") [
+    "-trust-domain"
+    (escapeShellArg cfg.trustDomain)
   ]
   ++ map (policy: "-policy ${escapeShellArg (policyArg policy)}") cfg.policies
   ++ cfg.extraArgs;
@@ -59,13 +73,20 @@ in
     };
 
     listenAddress = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
       default = ":8443";
-      description = "TCP address for the gRPC listener.";
+      description = "TCP address for the SPIFFE-mTLS gRPC listener (null or empty to disable).";
+    };
+
+    peersecListenAddress = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "TCP or unix:// address for the SO_PEERSEC gRPC listener (null or empty to disable).";
     };
 
     trustDomain = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
+      default = null;
       description = "SPIFFE trust domain accepted from clients.";
     };
 
@@ -131,8 +152,14 @@ in
         types.submodule {
           options = {
             spiffeID = mkOption {
-              type = types.str;
+              type = types.nullOr types.str;
+              default = null;
               description = "SPIFFE ID the policy applies to.";
+            };
+            selinuxType = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "SELinux domain type (from SO_PEERSEC) the policy applies to.";
             };
             installationID = mkOption {
               type = types.nullOr types.int;
@@ -147,7 +174,7 @@ in
         }
       );
       default = [ ];
-      description = "Per-SPIFFE-ID permission grants enforced by the broker. The GitHub App installation restricts which repositories each policy can cover.";
+      description = "Per-identity permission grants enforced by the broker. The GitHub App installation restricts which repositories each policy can cover.";
     };
 
     extraArgs = mkOption {
@@ -163,6 +190,18 @@ in
         assertion = cfg.policies != [ ];
         message = "services.github-token-broker.policies must not be empty.";
       }
+      {
+        assertion = spiffeEnabled || peersecEnabled;
+        message = "services.github-token-broker requires at least one of listenAddress or peersecListenAddress.";
+      }
+      {
+        assertion = !spiffeEnabled || (cfg.trustDomain != null && cfg.trustDomain != "");
+        message = "services.github-token-broker.trustDomain is required when listenAddress is enabled.";
+      }
+      {
+        assertion = lib.all (p: (p.spiffeID != null) != (p.selinuxType != null)) cfg.policies;
+        message = "Each policy in services.github-token-broker.policies must set exactly one of spiffeID or selinuxType.";
+      }
     ];
 
     users.groups = lib.mkIf cfg.createUser {
@@ -176,18 +215,20 @@ in
     };
 
     systemd.services.github-token-broker = {
-      description = "SPIFFE-mTLS GitHub App token broker";
+      description = "SPIFFE-mTLS / SO_PEERSEC GitHub App token broker";
       wantedBy = [ "multi-user.target" ];
-      after = [ "spire-agent.service" ];
-      wants = [ "spire-agent.service" ];
+      after = lib.mkIf spiffeEnabled [ "spire-agent.service" ];
+      wants = lib.mkIf spiffeEnabled [ "spire-agent.service" ];
       startLimitIntervalSec = 0;
 
-      environment.SPIFFE_ENDPOINT_SOCKET = cfg.spiffeEndpointSocket;
+      environment = lib.mkIf spiffeEnabled {
+        SPIFFE_ENDPOINT_SOCKET = cfg.spiffeEndpointSocket;
+      };
 
       serviceConfig = {
         User = cfg.user;
         Group = cfg.group;
-        SupplementaryGroups = [ cfg.spireGroup ];
+        SupplementaryGroups = lib.mkIf spiffeEnabled [ cfg.spireGroup ];
         LoadCredential = [ "app.pem:${cfg.privateKeyFile}" ];
         ExecStart = "${lib.getExe cfg.package} ${concatStringsSep " " execArgs}";
         Restart = "on-failure";
