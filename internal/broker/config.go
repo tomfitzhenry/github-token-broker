@@ -14,12 +14,13 @@ import (
 
 // Config is the broker configuration. It is built from command-line flags.
 type Config struct {
-	ListenAddr  string
-	TrustDomain spiffeid.TrustDomain
-	CacheSkew   time.Duration
-	GitHub      GitHubConfig
-	Key         *rsa.PrivateKey
-	Policies    []Policy
+	ListenAddr        string
+	PeerSecListenAddr string
+	TrustDomain       spiffeid.TrustDomain
+	CacheSkew         time.Duration
+	GitHub            GitHubConfig
+	Key               *rsa.PrivateKey
+	Policies          []Policy
 }
 
 type GitHubConfig struct {
@@ -31,6 +32,7 @@ type GitHubConfig struct {
 
 type Policy struct {
 	SPIFFEID       spiffeid.ID
+	SELinuxType    string
 	InstallationID int64
 	Permissions    map[string]string
 }
@@ -50,11 +52,11 @@ func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
 
 // Validate applies defaults and checks the flag-derived configuration.
 func (c *Config) Validate() error {
-	if c.ListenAddr == "" {
-		c.ListenAddr = ":8443"
+	if c.ListenAddr == "" && c.PeerSecListenAddr == "" {
+		return fmt.Errorf("at least one of -listen or -peersec-listen is required")
 	}
-	if c.TrustDomain.String() == "" {
-		return fmt.Errorf("-trust-domain is required")
+	if c.ListenAddr != "" && c.TrustDomain.String() == "" {
+		return fmt.Errorf("-trust-domain is required when -listen is set")
 	}
 	if c.GitHub.AppID <= 0 {
 		return fmt.Errorf("-app-id is required")
@@ -80,11 +82,23 @@ func (c *Config) Validate() error {
 
 	for i := range c.Policies {
 		policy := &c.Policies[i]
-		if policy.SPIFFEID.IsZero() {
-			return fmt.Errorf("policies[%d].spiffe_id is required", i)
+		hasSPIFFE := !policy.SPIFFEID.IsZero()
+		hasSELinux := policy.SELinuxType != ""
+		if hasSPIFFE == hasSELinux {
+			return fmt.Errorf("policies[%d] must specify exactly one of spiffe_id or selinux_type", i)
 		}
-		if policy.SPIFFEID.TrustDomain().String() != c.TrustDomain.String() {
-			return fmt.Errorf("policies[%d].spiffe_id is outside trust domain %s", i, c.TrustDomain)
+		if hasSPIFFE {
+			if c.TrustDomain.String() == "" {
+				return fmt.Errorf("-trust-domain is required for policies[%d].spiffe_id", i)
+			}
+			if policy.SPIFFEID.TrustDomain().String() != c.TrustDomain.String() {
+				return fmt.Errorf("policies[%d].spiffe_id is outside trust domain %s", i, c.TrustDomain)
+			}
+		}
+		if hasSELinux {
+			if err := validateSELinuxType(policy.SELinuxType); err != nil {
+				return fmt.Errorf("policies[%d].selinux_type: %w", i, err)
+			}
 		}
 		if policy.InstallationID == 0 {
 			policy.InstallationID = c.GitHub.InstallationID
@@ -104,9 +118,23 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+func validateSELinuxType(t string) error {
+	if t == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if t == "unlabeled_t" {
+		return fmt.Errorf("unlabeled_t is not allowed")
+	}
+	if strings.ContainsAny(t, " \t\r\n:") {
+		return fmt.Errorf("invalid type %q", t)
+	}
+	return nil
+}
+
 // ParsePolicy parses one repeatable -policy flag:
 //
 //	spiffe_id=spiffe://example.org/agent/opencode;permissions=contents=write,pull_requests=write
+//	selinux_type=svc_reader_t;permissions=contents=read
 //
 // The GitHub App installation determines which repositories are available; a
 // policy only grants permissions. installation_id is optional and defaults to
@@ -115,6 +143,7 @@ func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallati
 	var (
 		policy     Policy
 		spiffeRaw  string
+		selinuxRaw string
 		permsRaw   string
 		installRaw string
 	)
@@ -126,6 +155,8 @@ func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallati
 		switch strings.TrimSpace(key) {
 		case "spiffe_id":
 			spiffeRaw = strings.TrimSpace(value)
+		case "selinux_type":
+			selinuxRaw = strings.TrimSpace(value)
 		case "permissions":
 			permsRaw = strings.TrimSpace(value)
 		case "installation_id":
@@ -135,15 +166,27 @@ func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallati
 		}
 	}
 
-	if spiffeRaw == "" {
-		return Policy{}, fmt.Errorf("policy is missing spiffe_id")
+	if (spiffeRaw == "") == (selinuxRaw == "") {
+		return Policy{}, fmt.Errorf("policy must specify exactly one of spiffe_id or selinux_type")
 	}
-	id, err := spiffeid.FromString(spiffeRaw)
-	if err != nil {
-		return Policy{}, fmt.Errorf("spiffe_id: %w", err)
+	if spiffeRaw != "" {
+		if trustDomain.String() == "" {
+			return Policy{}, fmt.Errorf("-trust-domain is required for spiffe_id policies")
+		}
+		id, err := spiffeid.FromString(spiffeRaw)
+		if err != nil {
+			return Policy{}, fmt.Errorf("spiffe_id: %w", err)
+		}
+		if id.TrustDomain().String() != trustDomain.String() {
+			return Policy{}, fmt.Errorf("spiffe_id is outside trust domain %s", trustDomain)
+		}
+		policy.SPIFFEID = id
 	}
-	if id.TrustDomain().String() != trustDomain.String() {
-		return Policy{}, fmt.Errorf("spiffe_id is outside trust domain %s", trustDomain)
+	if selinuxRaw != "" {
+		if err := validateSELinuxType(selinuxRaw); err != nil {
+			return Policy{}, fmt.Errorf("selinux_type: %w", err)
+		}
+		policy.SELinuxType = selinuxRaw
 	}
 	if permsRaw == "" {
 		return Policy{}, fmt.Errorf("policy is missing permissions")
@@ -162,7 +205,6 @@ func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallati
 		policy.Permissions[name] = value
 	}
 
-	policy.SPIFFEID = id
 	policy.InstallationID = defaultInstallationID
 	if installRaw != "" {
 		installationID, err := strconv.ParseInt(installRaw, 10, 64)

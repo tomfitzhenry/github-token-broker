@@ -15,21 +15,30 @@
 # has the same effect; aliases only apply to interactive shells.
 #
 # Configuration:
-#   GH_VIA_SPIFFE_BROKER       broker gRPC address, e.g. host:8443     (required)
-#   GH_VIA_SPIFFE_SERVER_ID    SPIFFE ID the broker presents           (required)
-#   GH_VIA_SPIFFE_REPOSITORY   owner/repo override (default: from origin)
-#   GH_VIA_SPIFFE_PERMISSIONS  comma-separated KEY=VALUE list, e.g.
-#                              contents=read,pull_requests=write
-#                              (default: whatever the broker policy grants)
-#   SPIFFE_ENDPOINT_SOCKET     SPIRE Workload API socket, if not the default
+#   GH_VIA_SPIFFE_BROKER             broker gRPC address, e.g. host:8443     (required)
+#   GH_VIA_SPIFFE_AUTH               spiffe (default) or peersec
+#   GH_VIA_SPIFFE_SERVER_ID          SPIFFE ID the broker presents           (required for spiffe)
+#   GH_VIA_SPIFFE_SERVER_SELINUX_TYPE  expected broker SELinux type          (optional for peersec)
+#   GH_VIA_SPIFFE_REPOSITORY         owner/repo override (default: from origin)
+#   GH_VIA_SPIFFE_PERMISSIONS        comma-separated KEY=VALUE list, e.g.
+#                                    contents=read,pull_requests=write
+#                                    (default: whatever the broker policy grants)
+#   SPIFFE_ENDPOINT_SOCKET           SPIRE Workload API socket, if not the default
 
-# nixpkgs' SPIRE module (and this repository's NixOS module) use this path;
-# SPIRE's own default is /tmp/spire-agent/public/api.sock.
-: "${SPIFFE_ENDPOINT_SOCKET:=unix:///run/spire/agent/public/api.sock}"
-export SPIFFE_ENDPOINT_SOCKET
+auth=${GH_VIA_SPIFFE_AUTH:-spiffe}
+if [ "${auth}" = "spiffe" ]; then
+  # nixpkgs' SPIRE module (and this repository's NixOS module) use this path;
+  # SPIRE's own default is /tmp/spire-agent/public/api.sock.
+  : "${SPIFFE_ENDPOINT_SOCKET:=unix:///run/spire/agent/public/api.sock}"
+  export SPIFFE_ENDPOINT_SOCKET
+fi
 
-if [ -z "${GH_VIA_SPIFFE_BROKER:-}" ] || [ -z "${GH_VIA_SPIFFE_SERVER_ID:-}" ]; then
-  echo "gh-via-spiffe: set GH_VIA_SPIFFE_BROKER and GH_VIA_SPIFFE_SERVER_ID" >&2
+if [ -z "${GH_VIA_SPIFFE_BROKER:-}" ]; then
+  echo "gh-via-spiffe: set GH_VIA_SPIFFE_BROKER" >&2
+  exit 2
+fi
+if [ "${auth}" = "spiffe" ] && [ -z "${GH_VIA_SPIFFE_SERVER_ID:-}" ]; then
+  echo "gh-via-spiffe: set GH_VIA_SPIFFE_SERVER_ID for spiffe auth" >&2
   exit 2
 fi
 
@@ -46,9 +55,14 @@ if [ -n "${repository}" ]; then
   export GH_REPO="${repository}"
   token_args=(
     --broker "${GH_VIA_SPIFFE_BROKER}"
-    --server-id "${GH_VIA_SPIFFE_SERVER_ID}"
+    --auth "${auth}"
     --repository "${repository}"
   )
+  if [ "${auth}" = "spiffe" ]; then
+    token_args+=(--server-id "${GH_VIA_SPIFFE_SERVER_ID}")
+  elif [ -n "${GH_VIA_SPIFFE_SERVER_SELINUX_TYPE:-}" ]; then
+    token_args+=(--server-selinux-type "${GH_VIA_SPIFFE_SERVER_SELINUX_TYPE}")
+  fi
   if [ -n "${GH_VIA_SPIFFE_PERMISSIONS:-}" ]; then
     IFS=',' read -r -a permissions <<<"${GH_VIA_SPIFFE_PERMISSIONS}"
     for permission in "${permissions[@]}"; do

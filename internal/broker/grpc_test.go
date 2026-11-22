@@ -12,7 +12,9 @@ import (
 	"time"
 
 	tokenbrokerv1 "github.com/tomfitzhenry/github-token-broker/gen/tokenbroker/v1"
+	"github.com/tomfitzhenry/go-grpc-peersec"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -38,6 +40,11 @@ func testBrokerConfig(t *testing.T) *Config {
 				InstallationID: 456,
 				Permissions:    map[string]string{"contents": "read"},
 			},
+			{
+				SELinuxType:    "svc_reader_t",
+				InstallationID: 456,
+				Permissions:    map[string]string{"contents": "read"},
+			},
 		},
 		CacheSkew: 300 * time.Second,
 	}
@@ -58,7 +65,7 @@ func TestMintTokenRPC(t *testing.T) {
 	b.github.BaseURL = server.URL
 	b.github.HTTP = server.Client()
 	id := testID(t, "spiffe://example.org/agent/writer")
-	ctx := context.WithValue(context.Background(), peerIDKey{}, id)
+	ctx := context.WithValue(context.Background(), principalKey{}, Principal{SPIFFEID: id})
 
 	resp, err := (&tokenService{broker: b}).MintToken(ctx, &tokenbrokerv1.MintTokenRequest{
 		Repository: "example/repo",
@@ -89,7 +96,7 @@ func TestMintTokenRPCAllowsAnyRepository(t *testing.T) {
 	b.github.BaseURL = server.URL
 	b.github.HTTP = server.Client()
 	id := testID(t, "spiffe://example.org/agent/writer")
-	ctx := context.WithValue(context.Background(), peerIDKey{}, id)
+	ctx := context.WithValue(context.Background(), principalKey{}, Principal{SPIFFEID: id})
 
 	// The old policies used to list example/repo. The broker no longer rejects
 	// other repositories; the App installation enforces that boundary.
@@ -112,7 +119,7 @@ func TestMintTokenRPCForbidden(t *testing.T) {
 	cfg := testBrokerConfig(t)
 	b := New(cfg, nil)
 	id := testID(t, "spiffe://example.org/agent/reader")
-	ctx := context.WithValue(context.Background(), peerIDKey{}, id)
+	ctx := context.WithValue(context.Background(), principalKey{}, Principal{SPIFFEID: id})
 
 	_, err := (&tokenService{broker: b}).MintToken(ctx, &tokenbrokerv1.MintTokenRequest{
 		Repository:  "example/repo",
@@ -120,5 +127,60 @@ func TestMintTokenRPCForbidden(t *testing.T) {
 	})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("code = %v, want PermissionDenied", status.Code(err))
+	}
+}
+
+func TestPeerSecAuthInterceptorAndAuthorize(t *testing.T) {
+	if err := authorizePeerSec(grpcpeersec.AuthInfo{Raw: "system_u:system_r:svc_reader_t:s0"}); err != nil {
+		t.Fatalf("authorizePeerSec valid: %v", err)
+	}
+	if err := authorizePeerSec(grpcpeersec.AuthInfo{Raw: "system_u:object_r:unlabeled_t:s0"}); err == nil {
+		t.Fatal("authorizePeerSec accepted unlabeled_t")
+	}
+	if err := authorizePeerSec(grpcpeersec.AuthInfo{Raw: "not-a-context"}); err == nil {
+		t.Fatal("authorizePeerSec accepted invalid context")
+	}
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		fmt.Fprint(w, `{"token":"ghs_peersec","expires_at":"2026-11-02T12:00:00Z"}`)
+	}))
+	defer server.Close()
+
+	cfg := testBrokerConfig(t)
+	b := New(cfg, nil)
+	b.github.BaseURL = server.URL
+	b.github.HTTP = server.Client()
+	svc := &tokenService{broker: b}
+
+	peerCtx := peer.NewContext(context.Background(), &peer.Peer{
+		AuthInfo: grpcpeersec.AuthInfo{Raw: "system_u:system_r:svc_reader_t:s0"},
+	})
+	respAny, err := b.peersecAuthInterceptor(peerCtx, &tokenbrokerv1.MintTokenRequest{
+		Repository: "example/repo",
+	}, nil, func(ctx context.Context, req any) (any, error) {
+		return svc.MintToken(ctx, req.(*tokenbrokerv1.MintTokenRequest))
+	})
+	if err != nil {
+		t.Fatalf("peersecAuthInterceptor: %v", err)
+	}
+	resp := respAny.(*tokenbrokerv1.MintTokenResponse)
+	if resp.GetToken() != "ghs_peersec" {
+		t.Fatalf("token = %q", resp.GetToken())
+	}
+
+	unlabeledCtx := peer.NewContext(context.Background(), &peer.Peer{
+		AuthInfo: grpcpeersec.AuthInfo{Raw: "system_u:object_r:unlabeled_t:s0"},
+	})
+	_, err = b.peersecAuthInterceptor(unlabeledCtx, &tokenbrokerv1.MintTokenRequest{
+		Repository: "example/repo",
+	}, nil, func(ctx context.Context, req any) (any, error) {
+		return svc.MintToken(ctx, req.(*tokenbrokerv1.MintTokenRequest))
+	})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("unlabeled code = %v, want Unauthenticated", status.Code(err))
 	}
 }

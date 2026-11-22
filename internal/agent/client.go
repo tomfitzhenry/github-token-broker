@@ -9,8 +9,11 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
+	"github.com/tomfitzhenry/go-grpc-peersec"
+	"github.com/tomfitzhenry/go-peersec"
 	tokenbrokerv1 "github.com/tomfitzhenry/github-token-broker/gen/tokenbroker/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 // Token is a scoped GitHub installation token returned by the broker.
@@ -55,6 +58,42 @@ func New(ctx context.Context, brokerAddr, serverID string) (*Client, error) {
 	return &Client{
 		conn:   conn,
 		source: source,
+		client: tokenbrokerv1.NewTokenBrokerClient(conn),
+	}, nil
+}
+
+// NewPeerSec creates a client using Linux SO_PEERSEC transport credentials.
+// If serverSELinuxType is non-empty, the handshake requires SO_PEERSEC and
+// verifies that the server's SELinux domain type matches.
+func NewPeerSec(brokerAddr, serverSELinuxType string) (*Client, error) {
+	opts := []grpcpeersec.Option{
+		grpcpeersec.WithSecurityLevel(credentials.PrivacyAndIntegrity),
+	}
+	if serverSELinuxType != "" {
+		opts = append(opts,
+			grpcpeersec.WithRequirePeerSec(true),
+			grpcpeersec.WithAuthorize(func(info grpcpeersec.AuthInfo) error {
+				sc, err := peersec.ParseSELinuxContext(info.Raw)
+				if err != nil {
+					return err
+				}
+				if sc.IsUnlabeled() || sc.Type != serverSELinuxType {
+					return fmt.Errorf("server SELinux type %q not allowed (want %q)", sc.Type, serverSELinuxType)
+				}
+				return nil
+			}),
+		)
+	}
+	conn, err := grpc.NewClient(
+		brokerAddr,
+		grpc.WithTransportCredentials(grpcpeersec.ClientCredentials(opts...)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<10)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connect to broker: %w", err)
+	}
+	return &Client{
+		conn:   conn,
 		client: tokenbrokerv1.NewTokenBrokerClient(conn),
 	}, nil
 }

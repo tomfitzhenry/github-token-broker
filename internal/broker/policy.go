@@ -20,12 +20,36 @@ type TokenRequest struct {
 	Permissions map[string]string `json:"permissions,omitempty"`
 }
 
+// Principal identifies an authenticated caller, either by SPIFFE ID or SELinux type.
+type Principal struct {
+	SPIFFEID    spiffeid.ID
+	SELinuxType string
+}
+
+// String returns a canonical string representation suitable for logging and cache keys.
+func (p Principal) String() string {
+	if p.SELinuxType != "" {
+		return "selinux:" + p.SELinuxType
+	}
+	return p.SPIFFEID.String()
+}
+
+func (p Principal) matches(policy Policy) bool {
+	if p.SELinuxType != "" && policy.SELinuxType != "" {
+		return p.SELinuxType == policy.SELinuxType
+	}
+	if !p.SPIFFEID.IsZero() && !policy.SPIFFEID.IsZero() {
+		return p.SPIFFEID.String() == policy.SPIFFEID.String()
+	}
+	return false
+}
+
 // Authorize returns the policy and the exact permission set to mint. The
 // requested repository must be a valid owner/repo name; the GitHub App
 // installation, not the broker, restricts which repositories a policy can
 // cover. An empty request permission set means "all permissions granted to
 // this identity".
-func (c *Config) Authorize(id spiffeid.ID, req TokenRequest) (Policy, map[string]string, error) {
+func (c *Config) Authorize(principal Principal, req TokenRequest) (Policy, map[string]string, error) {
 	repository := strings.TrimSpace(req.Repository)
 	if repository == "" {
 		return Policy{}, nil, fmt.Errorf("repository is required")
@@ -35,7 +59,7 @@ func (c *Config) Authorize(id spiffeid.ID, req TokenRequest) (Policy, map[string
 	}
 
 	for _, policy := range c.Policies {
-		if policy.SPIFFEID.String() != id.String() {
+		if !principal.matches(policy) {
 			continue
 		}
 		permissions := policy.Permissions
