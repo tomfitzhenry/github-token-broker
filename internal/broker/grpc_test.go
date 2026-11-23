@@ -184,3 +184,34 @@ func TestPeerSecAuthInterceptorAndAuthorize(t *testing.T) {
 		t.Fatalf("unlabeled code = %v, want Unauthenticated", status.Code(err))
 	}
 }
+
+func TestInsecureAuthInterceptor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"token":"ghs_insecure","expires_at":"2026-11-02T12:00:00Z"}`)
+	}))
+	defer server.Close()
+
+	cfg := testBrokerConfig(t)
+	cfg.Policies = append(cfg.Policies, Policy{
+		Insecure:       true,
+		InstallationID: 42,
+		Permissions:    map[string]string{"contents": "read"},
+	})
+	b := New(cfg, nil)
+	b.github.BaseURL = server.URL
+	b.github.HTTP = server.Client()
+	svc := &tokenService{broker: b}
+
+	respAny, err := b.insecureAuthInterceptor(context.Background(), &tokenbrokerv1.MintTokenRequest{
+		Repository: "example/repo",
+	}, nil, func(ctx context.Context, req any) (any, error) {
+		return svc.MintToken(ctx, req.(*tokenbrokerv1.MintTokenRequest))
+	})
+	if err != nil {
+		t.Fatalf("insecureAuthInterceptor: %v", err)
+	}
+	resp := respAny.(*tokenbrokerv1.MintTokenResponse)
+	if resp.GetToken() != "ghs_insecure" {
+		t.Fatalf("token = %q", resp.GetToken())
+	}
+}

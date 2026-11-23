@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
@@ -114,6 +115,17 @@ func (b *Broker) Run(ctx context.Context) error {
 			grpcpeersec.WithAuthorize(authorizePeerSec),
 		)
 		listeners = append(listeners, b.newGRPCListener("peersec", b.cfg.PeerSecListenAddr, ln, creds, b.peersecAuthInterceptor))
+	}
+
+	if b.cfg.InsecureListenAddr != "" {
+		ln, err := net.Listen("tcp", b.cfg.InsecureListenAddr)
+		if err != nil {
+			for _, l := range listeners {
+				_ = l.listener.Close()
+			}
+			return fmt.Errorf("insecure listen %s: %w", b.cfg.InsecureListenAddr, err)
+		}
+		listeners = append(listeners, b.newGRPCListener("insecure", b.cfg.InsecureListenAddr, ln, insecure.NewCredentials(), b.insecureAuthInterceptor))
 	}
 
 	errCh := make(chan error, len(listeners))
@@ -238,6 +250,15 @@ func (b *Broker) peersecAuthInterceptor(
 		return nil, status.Error(codes.Unauthenticated, "valid labeled SO_PEERSEC required")
 	}
 	return handler(context.WithValue(ctx, principalKey{}, Principal{SELinuxType: sc.Type}), req)
+}
+
+func (b *Broker) insecureAuthInterceptor(
+	ctx context.Context,
+	req any,
+	_ *grpc.UnaryServerInfo,
+	handler grpc.UnaryHandler,
+) (any, error) {
+	return handler(context.WithValue(ctx, principalKey{}, Principal{Insecure: true}), req)
 }
 
 type tokenService struct {

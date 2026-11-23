@@ -176,6 +176,45 @@ func TestValidatePeerSecOnly(t *testing.T) {
 
 	cfg.PeerSecListenAddr = ""
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when both ListenAddr and PeerSecListenAddr are empty")
+		t.Fatal("expected error when ListenAddr, PeerSecListenAddr, and InsecureListenAddr are empty")
+	}
+}
+
+func TestParsePolicyInsecureAndValidate(t *testing.T) {
+	policy, err := ParsePolicy(
+		"insecure=true;permissions=contents=read",
+		spiffeid.TrustDomain{}, 42,
+	)
+	if err != nil {
+		t.Fatalf("ParsePolicy: %v", err)
+	}
+	if !policy.Insecure || policy.InstallationID != 42 {
+		t.Fatalf("policy = %+v", policy)
+	}
+
+	for _, bad := range []string{
+		"insecure=false;permissions=contents=read",
+		"insecure=maybe;permissions=contents=read",
+		"insecure=true;selinux_type=svc_foo_t;permissions=contents=read",
+	} {
+		if _, err := ParsePolicy(bad, spiffeid.TrustDomain{}, 42); err == nil {
+			t.Fatalf("ParsePolicy(%q) succeeded, want error", bad)
+		}
+	}
+
+	keyPath, key := testKeyFile(t)
+	cfg := &Config{
+		InsecureListenAddr: "127.0.0.1:0",
+		CacheSkew:          5 * time.Minute,
+		GitHub: GitHubConfig{
+			AppID:          1,
+			InstallationID: 42,
+			PrivateKeyFile: keyPath,
+		},
+		Key:      key,
+		Policies: []Policy{policy},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
 }

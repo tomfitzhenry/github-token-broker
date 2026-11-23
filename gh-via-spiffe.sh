@@ -16,7 +16,7 @@
 #
 # Configuration:
 #   GH_VIA_SPIFFE_BROKER             broker gRPC address, e.g. host:8443     (required)
-#   GH_VIA_SPIFFE_AUTH               spiffe (default) or peersec
+#   GH_VIA_SPIFFE_AUTH               spiffe (default), peersec, or insecure
 #   GH_VIA_SPIFFE_SERVER_ID          SPIFFE ID the broker presents           (required for spiffe)
 #   GH_VIA_SPIFFE_SERVER_SELINUX_TYPE  expected broker SELinux type          (optional for peersec)
 #   GH_VIA_SPIFFE_REPOSITORY         owner/repo override (default: from origin)
@@ -60,7 +60,7 @@ if [ -n "${repository}" ]; then
   )
   if [ "${auth}" = "spiffe" ]; then
     token_args+=(--server-id "${GH_VIA_SPIFFE_SERVER_ID}")
-  elif [ -n "${GH_VIA_SPIFFE_SERVER_SELINUX_TYPE:-}" ]; then
+  elif [ "${auth}" = "peersec" ] && [ -n "${GH_VIA_SPIFFE_SERVER_SELINUX_TYPE:-}" ]; then
     token_args+=(--server-selinux-type "${GH_VIA_SPIFFE_SERVER_SELINUX_TYPE}")
   fi
   if [ -n "${GH_VIA_SPIFFE_PERMISSIONS:-}" ]; then

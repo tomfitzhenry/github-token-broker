@@ -14,13 +14,14 @@ import (
 
 // Config is the broker configuration. It is built from command-line flags.
 type Config struct {
-	ListenAddr        string
-	PeerSecListenAddr string
-	TrustDomain       spiffeid.TrustDomain
-	CacheSkew         time.Duration
-	GitHub            GitHubConfig
-	Key               *rsa.PrivateKey
-	Policies          []Policy
+	ListenAddr         string
+	PeerSecListenAddr  string
+	InsecureListenAddr string
+	TrustDomain        spiffeid.TrustDomain
+	CacheSkew          time.Duration
+	GitHub             GitHubConfig
+	Key                *rsa.PrivateKey
+	Policies           []Policy
 }
 
 type GitHubConfig struct {
@@ -33,6 +34,7 @@ type GitHubConfig struct {
 type Policy struct {
 	SPIFFEID       spiffeid.ID
 	SELinuxType    string
+	Insecure       bool
 	InstallationID int64
 	Permissions    map[string]string
 }
@@ -52,8 +54,8 @@ func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
 
 // Validate applies defaults and checks the flag-derived configuration.
 func (c *Config) Validate() error {
-	if c.ListenAddr == "" && c.PeerSecListenAddr == "" {
-		return fmt.Errorf("at least one of -listen or -peersec-listen is required")
+	if c.ListenAddr == "" && c.PeerSecListenAddr == "" && c.InsecureListenAddr == "" {
+		return fmt.Errorf("at least one of -listen, -peersec-listen, or -insecure-listen is required")
 	}
 	if c.ListenAddr != "" && c.TrustDomain.String() == "" {
 		return fmt.Errorf("-trust-domain is required when -listen is set")
@@ -84,8 +86,18 @@ func (c *Config) Validate() error {
 		policy := &c.Policies[i]
 		hasSPIFFE := !policy.SPIFFEID.IsZero()
 		hasSELinux := policy.SELinuxType != ""
-		if hasSPIFFE == hasSELinux {
-			return fmt.Errorf("policies[%d] must specify exactly one of spiffe_id or selinux_type", i)
+		selectors := 0
+		if hasSPIFFE {
+			selectors++
+		}
+		if hasSELinux {
+			selectors++
+		}
+		if policy.Insecure {
+			selectors++
+		}
+		if selectors != 1 {
+			return fmt.Errorf("policies[%d] must specify exactly one of spiffe_id, selinux_type, or insecure", i)
 		}
 		if hasSPIFFE {
 			if c.TrustDomain.String() == "" {
@@ -141,11 +153,12 @@ func validateSELinuxType(t string) error {
 // the global -installation-id.
 func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallationID int64) (Policy, error) {
 	var (
-		policy     Policy
-		spiffeRaw  string
-		selinuxRaw string
-		permsRaw   string
-		installRaw string
+		policy      Policy
+		spiffeRaw   string
+		selinuxRaw  string
+		insecureRaw string
+		permsRaw    string
+		installRaw  string
 	)
 	for _, field := range strings.Split(raw, ";") {
 		key, value, ok := strings.Cut(field, "=")
@@ -157,6 +170,8 @@ func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallati
 			spiffeRaw = strings.TrimSpace(value)
 		case "selinux_type":
 			selinuxRaw = strings.TrimSpace(value)
+		case "insecure":
+			insecureRaw = strings.TrimSpace(value)
 		case "permissions":
 			permsRaw = strings.TrimSpace(value)
 		case "installation_id":
@@ -166,8 +181,26 @@ func ParsePolicy(raw string, trustDomain spiffeid.TrustDomain, defaultInstallati
 		}
 	}
 
-	if (spiffeRaw == "") == (selinuxRaw == "") {
-		return Policy{}, fmt.Errorf("policy must specify exactly one of spiffe_id or selinux_type")
+	if insecureRaw != "" {
+		b, err := strconv.ParseBool(insecureRaw)
+		if err != nil {
+			return Policy{}, fmt.Errorf("insecure: %w", err)
+		}
+		policy.Insecure = b
+	}
+
+	selectors := 0
+	if spiffeRaw != "" {
+		selectors++
+	}
+	if selinuxRaw != "" {
+		selectors++
+	}
+	if policy.Insecure {
+		selectors++
+	}
+	if selectors != 1 {
+		return Policy{}, fmt.Errorf("policy must specify exactly one of spiffe_id, selinux_type, or insecure=true")
 	}
 	if spiffeRaw != "" {
 		if trustDomain.String() == "" {
