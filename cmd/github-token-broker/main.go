@@ -14,13 +14,14 @@ import (
 	"github.com/tomfitzhenry/github-token-broker/internal/broker"
 )
 
-const policyHelp = "policy: (spiffe_id=SPIFFE_ID|selinux_type=TYPE);permissions=name=read|write[,name=read|write...][;installation_id=N] (repeatable; the GitHub App installation restricts repositories)"
+const policyHelp = "policy: (spiffe_id=SPIFFE_ID|selinux_type=TYPE|insecure=true);permissions=name=read|write[,name=read|write...][;installation_id=N] (repeatable; the GitHub App installation restricts repositories)"
 
 func main() {
 	var (
-		listenAddr        = flag.String("listen", ":8443", "SPIFFE-mTLS listen address (empty to disable)")
-		peersecListenAddr = flag.String("peersec-listen", "", "SO_PEERSEC listen address (host:port or unix:///path)")
-		trustDomainRaw    = flag.String("trust-domain", "", "SPIFFE trust domain")
+		listenAddr         = flag.String("listen", ":8443", "SPIFFE-mTLS listen address (empty to disable)")
+		peersecListenAddr  = flag.String("peersec-listen", "", "SO_PEERSEC listen address (host:port or unix:///path)")
+		insecureListenAddr = flag.String("insecure-listen", "", "plain h2c gRPC listen address (e.g. a WireGuard IP:port)")
+		trustDomainRaw     = flag.String("trust-domain", "", "SPIFFE trust domain")
 		cacheSkew         = flag.Duration("cache-skew", 5*time.Minute, "stop serving cached tokens this long before expiry")
 		appID             = flag.Int64("app-id", 0, "GitHub App ID")
 		installationID    = flag.Int64("installation-id", 0, "default GitHub App installation ID")
@@ -58,9 +59,10 @@ func main() {
 		os.Exit(2)
 	}
 	cfg := &broker.Config{
-		ListenAddr:        *listenAddr,
-		PeerSecListenAddr: *peersecListenAddr,
-		TrustDomain:       trustDomain,
+		ListenAddr:         *listenAddr,
+		PeerSecListenAddr:  *peersecListenAddr,
+		InsecureListenAddr: *insecureListenAddr,
+		TrustDomain:        trustDomain,
 		CacheSkew:         *cacheSkew,
 		GitHub: broker.GitHubConfig{
 			AppID:          *appID,

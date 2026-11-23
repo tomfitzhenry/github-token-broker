@@ -20,14 +20,19 @@ type TokenRequest struct {
 	Permissions map[string]string `json:"permissions,omitempty"`
 }
 
-// Principal identifies an authenticated caller, either by SPIFFE ID or SELinux type.
+// Principal identifies an authenticated caller (by SPIFFE ID or SELinux type)
+// or an unauthenticated caller on the insecure (e.g. WireGuard-only) listener.
 type Principal struct {
 	SPIFFEID    spiffeid.ID
 	SELinuxType string
+	Insecure    bool
 }
 
 // String returns a canonical string representation suitable for logging and cache keys.
 func (p Principal) String() string {
+	if p.Insecure {
+		return "insecure"
+	}
 	if p.SELinuxType != "" {
 		return "selinux:" + p.SELinuxType
 	}
@@ -35,6 +40,9 @@ func (p Principal) String() string {
 }
 
 func (p Principal) matches(policy Policy) bool {
+	if p.Insecure && policy.Insecure {
+		return true
+	}
 	if p.SELinuxType != "" && policy.SELinuxType != "" {
 		return p.SELinuxType == policy.SELinuxType
 	}

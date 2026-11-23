@@ -14,6 +14,7 @@ import (
 	tokenbrokerv1 "github.com/tomfitzhenry/github-token-broker/gen/tokenbroker/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Token is a scoped GitHub installation token returned by the broker.
@@ -87,6 +88,23 @@ func NewPeerSec(brokerAddr, serverSELinuxType string) (*Client, error) {
 	conn, err := grpc.NewClient(
 		brokerAddr,
 		grpc.WithTransportCredentials(grpcpeersec.ClientCredentials(opts...)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<10)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connect to broker: %w", err)
+	}
+	return &Client{
+		conn:   conn,
+		client: tokenbrokerv1.NewTokenBrokerClient(conn),
+	}, nil
+}
+
+// NewInsecure creates a plain h2c gRPC client without transport authentication
+// (for example, over a WireGuard mesh where the network provides peer auth).
+func NewInsecure(brokerAddr string) (*Client, error) {
+	conn, err := grpc.NewClient(
+		brokerAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<10)),
 	)
 	if err != nil {

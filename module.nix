@@ -18,6 +18,7 @@ let
 
   spiffeEnabled = cfg.listenAddress != null && cfg.listenAddress != "";
   peersecEnabled = cfg.peersecListenAddress != null && cfg.peersecListenAddress != "";
+  insecureEnabled = cfg.insecureListenAddress != null && cfg.insecureListenAddress != "";
 
   policyArg =
     policy:
@@ -25,8 +26,10 @@ let
       identity =
         if policy.spiffeID != null then
           "spiffe_id=${policy.spiffeID}"
+        else if policy.selinuxType != null then
+          "selinux_type=${policy.selinuxType}"
         else
-          "selinux_type=${policy.selinuxType}";
+          "insecure=true";
       permissions = concatStringsSep "," (
         map (name: "${name}=${policy.permissions.${name}}") (lib.attrNames policy.permissions)
       );
@@ -53,6 +56,10 @@ let
   ++ lib.optionals peersecEnabled [
     "-peersec-listen"
     (escapeShellArg cfg.peersecListenAddress)
+  ]
+  ++ lib.optionals insecureEnabled [
+    "-insecure-listen"
+    (escapeShellArg cfg.insecureListenAddress)
   ]
   ++ lib.optionals (cfg.trustDomain != null && cfg.trustDomain != "") [
     "-trust-domain"
@@ -82,6 +89,12 @@ in
       type = types.nullOr types.str;
       default = null;
       description = "TCP or unix:// address for the SO_PEERSEC gRPC listener (null or empty to disable).";
+    };
+
+    insecureListenAddress = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "TCP address for the plain h2c gRPC listener (e.g. a WireGuard IP:port; null or empty to disable).";
     };
 
     trustDomain = mkOption {
@@ -161,6 +174,11 @@ in
               default = null;
               description = "SELinux domain type (from SO_PEERSEC) the policy applies to.";
             };
+            insecure = mkOption {
+              type = types.bool;
+              default = false;
+              description = "Apply this policy to callers on the plain h2c (-insecure-listen) listener.";
+            };
             installationID = mkOption {
               type = types.nullOr types.int;
               default = null;
@@ -191,16 +209,23 @@ in
         message = "services.github-token-broker.policies must not be empty.";
       }
       {
-        assertion = spiffeEnabled || peersecEnabled;
-        message = "services.github-token-broker requires at least one of listenAddress or peersecListenAddress.";
+        assertion = spiffeEnabled || peersecEnabled || insecureEnabled;
+        message = "services.github-token-broker requires at least one of listenAddress, peersecListenAddress, or insecureListenAddress.";
       }
       {
         assertion = !spiffeEnabled || (cfg.trustDomain != null && cfg.trustDomain != "");
         message = "services.github-token-broker.trustDomain is required when listenAddress is enabled.";
       }
       {
-        assertion = lib.all (p: (p.spiffeID != null) != (p.selinuxType != null)) cfg.policies;
-        message = "Each policy in services.github-token-broker.policies must set exactly one of spiffeID or selinuxType.";
+        assertion = lib.all (
+          p:
+          (lib.count (x: x) [
+            (p.spiffeID != null)
+            (p.selinuxType != null)
+            p.insecure
+          ]) == 1
+        ) cfg.policies;
+        message = "Each policy in services.github-token-broker.policies must set exactly one of spiffeID, selinuxType, or insecure = true.";
       }
     ];
 

@@ -23,11 +23,12 @@ Usage:
 
 In spiffe mode (default), the client obtains an X509-SVID from the local SPIRE
 agent and uses it for mTLS. In peersec mode, the client relies on kernel
-SO_PEERSEC (for example, over Labeled IPsec ESP-NULL or a Unix socket).
+SO_PEERSEC (for example, over Labeled IPsec ESP-NULL or a Unix socket). In
+insecure mode, the client uses plain h2c gRPC (for example, over WireGuard).
 
 Flags common to both commands:
   --broker ADDR               broker gRPC address, e.g. github-broker:8443
-  --auth MODE                 authentication mode: spiffe or peersec (default: spiffe)
+  --auth MODE                 authentication mode: spiffe, peersec, or insecure (default: spiffe)
   --server-id ID              broker SPIFFE ID (required when --auth=spiffe)
   --server-selinux-type TYPE  expected broker SELinux type (optional when --auth=peersec)
   --repository REPO           owner/repo to scope the token to
@@ -72,7 +73,7 @@ type options struct {
 
 func addFlags(fs *flag.FlagSet, opts *options) {
 	fs.StringVar(&opts.broker, "broker", "", "broker gRPC address (host:port or unix:///path)")
-	fs.StringVar(&opts.auth, "auth", "spiffe", "authentication mode: spiffe or peersec")
+	fs.StringVar(&opts.auth, "auth", "spiffe", "authentication mode: spiffe, peersec, or insecure")
 	fs.StringVar(&opts.serverID, "server-id", "", "broker SPIFFE ID (for --auth=spiffe)")
 	fs.StringVar(&opts.serverSELinuxType, "server-selinux-type", "", "expected broker SELinux type (for --auth=peersec)")
 	fs.StringVar(&opts.repository, "repository", "", "owner/repo to scope the token to")
@@ -98,8 +99,15 @@ func (o *options) validate() error {
 		if o.serverID != "" {
 			return fmt.Errorf("--server-id is only valid with --auth=spiffe")
 		}
+	case "insecure":
+		if o.serverID != "" {
+			return fmt.Errorf("--server-id is only valid with --auth=spiffe")
+		}
+		if o.serverSELinuxType != "" {
+			return fmt.Errorf("--server-selinux-type is only valid with --auth=peersec")
+		}
 	default:
-		return fmt.Errorf("unknown --auth mode %q (want spiffe or peersec)", o.auth)
+		return fmt.Errorf("unknown --auth mode %q (want spiffe, peersec, or insecure)", o.auth)
 	}
 	return nil
 }
@@ -112,6 +120,8 @@ func (o *options) token(ctx context.Context) (agent.Token, error) {
 	switch o.auth {
 	case "peersec":
 		client, err = agent.NewPeerSec(o.broker, o.serverSELinuxType)
+	case "insecure":
+		client, err = agent.NewInsecure(o.broker)
 	default:
 		client, err = agent.New(ctx, o.broker, o.serverID)
 	}
